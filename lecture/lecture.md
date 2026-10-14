@@ -442,10 +442,23 @@ python chat_eval.py -i sft -x 100
 ```
 
 ```output
-{{EVAL_TABLE}}
+$ python chat_eval.py -i base -x 100
+ARC-Easy: 29.00%
+ARC-Challenge: 26.00%
+MMLU: 29.00%
+GSM8K: 0.00%
+SpellingBee: 0.00%
+ChatCORE: 0.0240
+$ python chat_eval.py -i sft -x 100
+ARC-Easy: 24.00%
+ARC-Challenge: 26.00%
+MMLU: 26.00%
+GSM8K: 0.00%
+SpellingBee: 53.00%
+ChatCORE: 0.1087
 ```
 
-{{EVAL_COMMENT}}
+Okay so let's be honest about these numbers, because this is exactly where evaluations earn their keep. On the multiple choice tasks, both models are basically at chance, 25 percent. And with only 100 problems, the noise on each of these numbers is something like plus or minus four or five percent, so 24 versus 29 is not a real difference. GPT-2 small simply doesn't have the knowledge to answer MMLU questions, and SFT can't add knowledge that isn't there, it can only teach the format. You need a much bigger and better pretrained model for these to move, which is a big part of why nanochat pretrains its own, much stronger base models. GSM8K is zero for both. The SFT model has learned the format of a math solution, with calculator calls and the four hash signs at the end, but it can't actually do the reasoning. But SpellingBee goes from zero to 53 percent. That's a narrow, procedural task, and SFT taught the model a procedure, spell, count, double check with python, that it can actually execute. So the ChatCORE goes from 0.02 to 0.11, and essentially all of that comes from SpellingBee. And 53 percent is not great, but it's also not zero, which is exactly where we want to be for the next stage.
 
 > **Exercise:** Try evaluating the base model on MMLU with a few-shot prompt instead of the chat format. How close can you get to the SFT model just by prompting?
 
