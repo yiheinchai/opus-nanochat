@@ -7,6 +7,7 @@ python lecture/build.py video                # lecture/build/lecture.mp4 + lectu
 python lecture/build.py all
 
 python lecture/build.py audio --tts=silent   # no API key? silent placeholder audio, to preview the video timing
+python lecture/build.py video --chapters=2   # a quick preview of just the first two chapters
 """
 
 import os
@@ -375,7 +376,7 @@ def build_video(blocks, voice, model, tts):
     frames_dir = os.path.join(BUILD, "frames")
     os.makedirs(frames_dir, exist_ok=True)
     voice_key = voice if tts == "elevenlabs" else "silent"
-    timeline = [] # (frame path, audio path or None, seconds)
+    timeline = [] # (frame path, audio path or None, seconds, subtitle text)
     screen, previous_screen, chapter, chapter_number = None, None, "", 0
     frame_cache = {}
 
@@ -393,39 +394,38 @@ def build_video(blocks, voice, model, tts):
         elif b["type"] == "chapter":
             chapter, chapter_number = b["text"], chapter_number + 1
             screen = {"kind": "chapter", "text": b["text"], "number": f"Chapter {chapter_number - 1}" if chapter_number > 1 else ""}
-            timeline.append((frame_for(screen), None, 1.5))
+            timeline.append((frame_for(screen), None, 1.5, None))
         elif b["type"] in ("code", "bash"):
             language = "python" if b["type"] == "code" else "bash"
             label = b.get("source") or ("notebook" if b["type"] == "code" else "terminal")
             output = outputs.get(b["code"], "") if b["type"] == "code" and b["exec"] else ""
             screen = {"kind": "code", "code": b["code"], "language": language, "label": label, "output": output}
-            timeline.append((frame_for(screen), None, 1.0))
+            timeline.append((frame_for(screen), None, 1.0, None))
         elif b["type"] == "output":
             screen = dict(screen, output=b["text"])
-            timeline.append((frame_for(screen), None, 1.5))
+            timeline.append((frame_for(screen), None, 1.5, None))
         elif b["type"] == "narration":
             path = audio_path(spoken(b["text"]), voice_key, model)
-            timeline.append((frame_for(screen), path, None))
+            timeline.append((frame_for(screen), path, None, b["text"]))
         elif b["type"] == "exercise":
             text = spoken("Okay, here's an exercise for you. " + b["text"] + " Pause the video here and give it a try.")
             card = {"kind": "exercise", "text": b["text"]}
-            timeline.append((frame_for(card), audio_path(text, voice_key, model), None))
-            timeline.append((frame_for(card), None, 2.0))
+            timeline.append((frame_for(card), audio_path(text, voice_key, model), None, "Exercise: " + b["text"] + " Pause the video and give it a try."))
+            timeline.append((frame_for(card), None, 2.0, None))
 
     # assemble: one audio track (narration + silences), one video track (frames with durations), subtitles
-    missing = [a for _, a, _ in timeline if a is not None and not os.path.exists(a)]
+    missing = [a for _, a, _, _ in timeline if a is not None and not os.path.exists(a)]
     if missing:
         sys.exit(f"{len(missing)} narration segments have no audio yet, run the audio step first")
     concat_audio, concat_video, srt, t = [], [], [], 0.0
     silence = os.path.join(BUILD, "silence.mp3")
     subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-f", "lavfi", "-i", "anullsrc=r=44100:cl=mono", "-t", "0.5",
                     "-b:a", "128k", "-ar", "44100", silence], check=True)
-    segment_texts = {audio_path(s, voice_key, model): s for s in narration_segments(blocks)}
-    for frame, audio, seconds in timeline:
+    for frame, audio, seconds, text in timeline:
         if audio is not None:
             seconds = duration(audio)
             concat_audio.append(audio)
-            srt.extend(subtitles(segment_texts[audio], t, seconds))
+            srt.extend(subtitles(re.sub(r"[`*]", "", text), t, seconds))
         else:
             concat_audio.extend([silence] * round(seconds / 0.5))
         concat_video.append((frame, seconds))
@@ -474,8 +474,13 @@ if __name__ == "__main__":
     parser.add_argument("--tts", choices=["elevenlabs", "silent"], default="elevenlabs")
     parser.add_argument("--voice", default=os.environ.get("ELEVENLABS_VOICE_ID", "JBFqnCBsd6RMkjVDRZzb"), help="ElevenLabs voice id (default: George)")
     parser.add_argument("--model", default="eleven_multilingual_v2", help="ElevenLabs model id")
+    parser.add_argument("--chapters", type=int, default=None, help="only the first N chapters (for a quick preview)")
     args = parser.parse_args()
     blocks = parse()
+    if args.chapters is not None:
+        chapter_starts = [i for i, b in enumerate(blocks) if b["type"] == "chapter"]
+        if args.chapters < len(chapter_starts):
+            blocks = blocks[:chapter_starts[args.chapters]]
     if args.step == "stats":
         segments = narration_segments(blocks)
         words = sum(len(s.split()) for s in segments)
