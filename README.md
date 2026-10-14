@@ -38,6 +38,18 @@ The lecture's chapters:
 
 Every chapter has a "pause the video and try it yourself" exercise.
 
+## Results from the lecture's run
+
+Everything shown in the lecture comes from a real run on a 4-core CPU. That was 600 SFT steps (about 1.5 hours) and 40 RL steps on SpellingBee (about 3 hours). Evals use 100 problems per task, so expect about ±5% noise.
+
+| | ARC-Easy | ARC-Challenge | MMLU | GSM8K | SpellingBee (greedy) |
+|---|---|---|---|---|---|
+| GPT-2 base (chat format) | 29% | 26% | 29% | 0% | 0% |
+| after SFT | 24% | 26% | 26% | 0% | 53% |
+| after RL | | | | | 86% |
+
+During RL, held-out SpellingBee pass@1 at temperature 1 went from 44% to 87.5%, and pass@8 from 92% to 100%. Multiple choice and GSM8K stay at chance: GPT-2 small doesn't have the knowledge, and SFT can't add it. The lecture discusses this honestly, along with the two failures worth learning from: SpellingBee "leaking" into unrelated answers, and the single-token " strawberry" that the model can't spell.
+
 ## Follow along
 
 Locally (CPU or Apple Silicon works for everything; training is just slow):
@@ -63,7 +75,7 @@ The defaults assume a 40GB+ GPU. On a 16GB GPU (e.g. a T4), use `python chat_sft
 
 `lecture/build.py` turns `lecture/lecture.md` into a video. Each narration paragraph becomes one ElevenLabs clip, and the screen shows the code and real output being discussed. It also writes an `.srt` subtitle file.
 
-1. Create an ElevenLabs account and an API key (Profile → API Keys). The lecture is about 38,000 characters, so check that your plan's monthly character quota covers it. `python lecture/build.py stats` prints the exact count.
+1. Create an ElevenLabs account and an API key (Profile → API Keys). The lecture is about 49,000 characters (roughly an hour of audio), so check that your plan's monthly character quota covers it. `python lecture/build.py stats` prints the exact count.
 2. Keep the key out of the code and the chat. Put it in an environment variable or a Colab Secret named `ELEVENLABS_API_KEY`.
 3. Run:
 

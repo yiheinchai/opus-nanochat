@@ -63,7 +63,7 @@ def parse(path=os.path.join(HERE, "lecture.md")):
                     code = extract(opts["from"], opts["start"], opts.get("end"))
                 blocks.append({"type": "code", "code": code, "source": opts.get("from"), "exec": opts.get("exec", "1") == "1"})
             elif kind == "bash":
-                blocks.append({"type": "bash", "code": code})
+                blocks.append({"type": "bash", "code": code, "exec": opts.get("exec", "1") == "1"})
             elif kind == "output":
                 blocks.append({"type": "output", "text": code})
         elif line.startswith("# "):
@@ -115,8 +115,10 @@ def build_notebook(blocks, execute=False):
                 executable.append(len(cells) - 1)
             else:
                 cells.append(new_markdown_cell(f"`{b['source']}`\n```python\n{b['code']}\n```"))
-        elif b["type"] == "bash":
+        elif b["type"] == "bash" and b["exec"]:
             cells.append(new_code_cell("\n".join("!" + line for line in b["code"].split("\n") if not line.startswith("#"))))
+        elif b["type"] == "bash":
+            cells.append(new_markdown_cell(f"```bash\n{b['code']}\n```"))
         elif b["type"] == "output":
             cells.append(new_markdown_cell(f"Output of the lecture's run:\n```\n{b['text']}\n```"))
     nb = new_notebook(cells=cells)
@@ -319,7 +321,37 @@ def draw_lines(draw, lines, x, y, fnt, line_height):
         y += line_height
     return y
 
-def render_screen(screen, chapter, path):
+def layout(screen):
+    """
+    Lay out code + output in pages. Use the biggest font (down to MIN_FONT) at which everything
+    fits on one screen, otherwise split the code over several pages (shown one after another).
+    Returns the font size and a list of pages, each page is (code lines, output lines)
+    """
+    from PIL import Image, ImageDraw
+    draw = ImageDraw.Draw(Image.new("RGB", (1, 1)))
+    code = highlight(screen["code"], screen["language"])
+    output = ansi_lines(screen["output"]) if screen.get("output") else []
+    height = (H - 30) - 100
+    for size in range(26, MIN_FONT - 1, -1):
+        max_chars = int((W - 140) / draw.textlength("x", font=font(size, mono=True)))
+        code_w, out_w = wrap(code, max_chars), wrap(output, max_chars)
+        line_h = int(size * 1.4)
+        if len(code_w) * line_h + 40 + (len(out_w) * line_h + 70 if out_w else 0) <= height:
+            return size, [(code_w, out_w)]
+    lines_per_page = (height - 40) // line_h
+    pages = [(code_w[i:i + lines_per_page], []) for i in range(0, len(code_w), lines_per_page)]
+    room = (height - 110 - len(pages[-1][0]) * line_h) // line_h # output goes on the last page if there is room
+    if out_w and room < 4:
+        pages.append((pages[-1][0][-3:], [])) # a new page, keep the last few lines of code for context
+        room = (height - 110 - 3 * line_h) // line_h
+    if len(out_w) > room:
+        out_w = [[("...", COLORS["muted"])]] + out_w[-(room - 1):] # keep the end, usually the interesting part
+    pages[-1] = (pages[-1][0], out_w)
+    return size, pages
+
+MIN_FONT = 18
+
+def render_screen(screen, chapter, path, page=0):
     from PIL import Image, ImageDraw
     img = Image.new("RGB", (W, H), COLORS["bg"])
     draw = ImageDraw.Draw(img)
@@ -337,31 +369,15 @@ def render_screen(screen, chapter, path):
             draw.text((W // 2, 340), subtitle, font=font(36), fill=COLORS["muted"], anchor="mm")
         img.save(path)
         return
+    size, pages = layout(screen)
+    code_w, out_w = pages[page]
+    fnt, line_h = font(size, mono=True), int(size * 1.4)
     # header
     draw.rectangle([0, 0, W, 72], fill=COLORS["header"])
     draw.text((40, 36), chapter, font=font(30, bold=True), fill=COLORS["text"], anchor="lm")
-    draw.text((W - 40, 36), screen.get("label", ""), font=font(26, mono=True), fill=COLORS["muted"], anchor="rm")
-    # code and output: pick the biggest font size such that everything fits
-    code = highlight(screen["code"], screen["language"])
-    output = ansi_lines(screen["output"]) if screen.get("output") else []
-    top, bottom, left, right = 100, H - 30, 50, W - 50
-    for size in range(26, 11, -1):
-        fnt = font(size, mono=True)
-        char_w = draw.textlength("x", font=fnt)
-        max_chars = int((right - left - 40) / char_w)
-        code_w, out_w = wrap(code, max_chars), wrap(output, max_chars)
-        line_h = int(size * 1.4)
-        needed = len(code_w) * line_h + 40 + (len(out_w) * line_h + 70 if out_w else 0)
-        if needed <= bottom - top:
-            break
-    else:
-        # still doesn't fit: keep the end of the output, which is usually the interesting part
-        room = (bottom - top - 110 - len(code_w) * line_h) // line_h
-        out_w = [[("...", COLORS["muted"])]] + out_w[-max(room - 1, 1):]
-        if room < 3:
-            code_w = code_w[:(bottom - top - 40) // line_h - 1] + [[("...", COLORS["muted"])]]
-            out_w = []
-    y = top
+    label = screen.get("label", "") + (f"  ({page + 1}/{len(pages)})" if len(pages) > 1 else "")
+    draw.text((W - 40, 36), label, font=font(26, mono=True), fill=COLORS["muted"], anchor="rm")
+    left, right, y = 50, W - 50, 100
     code_bottom = y + len(code_w) * line_h + 40
     draw.rectangle([left, y, right, code_bottom], fill=COLORS["codebg"], outline=COLORS["border"])
     draw_lines(draw, code_w, left + 20, y + 20, fnt, line_h)
@@ -376,66 +392,79 @@ def build_video(blocks, voice, model, tts):
     frames_dir = os.path.join(BUILD, "frames")
     os.makedirs(frames_dir, exist_ok=True)
     voice_key = voice if tts == "elevenlabs" else "silent"
-    timeline = [] # (frame path, audio path or None, seconds, subtitle text)
-    screen, previous_screen, chapter, chapter_number = None, None, "", 0
-    frame_cache = {}
-
-    def frame_for(screen):
-        key = hashlib.sha1(json.dumps([screen, chapter], sort_keys=True).encode()).hexdigest()[:16]
-        if key not in frame_cache:
-            path = os.path.join(frames_dir, f"{key}.png")
-            render_screen(screen, chapter, path)
-            frame_cache[key] = path
-        return frame_cache[key]
-
+    timeline = [] # dicts of: screen, audio path (or None for silence), seconds, subtitle text
+    screen, chapter, chapter_number = None, "", 0
     for b in blocks:
         if b["type"] == "title":
             screen = {"kind": "title", "text": b["text"]}
         elif b["type"] == "chapter":
             chapter, chapter_number = b["text"], chapter_number + 1
             screen = {"kind": "chapter", "text": b["text"], "number": f"Chapter {chapter_number - 1}" if chapter_number > 1 else ""}
-            timeline.append((frame_for(screen), None, 1.5, None))
+            timeline.append({"screen": screen, "chapter": chapter, "seconds": 1.5})
         elif b["type"] in ("code", "bash"):
             language = "python" if b["type"] == "code" else "bash"
             label = b.get("source") or ("notebook" if b["type"] == "code" else "terminal")
             output = outputs.get(b["code"], "") if b["type"] == "code" and b["exec"] else ""
             screen = {"kind": "code", "code": b["code"], "language": language, "label": label, "output": output}
-            timeline.append((frame_for(screen), None, 1.0, None))
+            timeline.append({"screen": screen, "chapter": chapter, "seconds": 1.0})
         elif b["type"] == "output":
             screen = dict(screen, output=b["text"])
-            timeline.append((frame_for(screen), None, 1.5, None))
+            timeline.append({"screen": screen, "chapter": chapter, "seconds": 1.5})
         elif b["type"] == "narration":
-            path = audio_path(spoken(b["text"]), voice_key, model)
-            timeline.append((frame_for(screen), path, None, b["text"]))
+            timeline.append({"screen": screen, "chapter": chapter, "audio": audio_path(spoken(b["text"]), voice_key, model), "text": b["text"]})
         elif b["type"] == "exercise":
             text = spoken("Okay, here's an exercise for you. " + b["text"] + " Pause the video here and give it a try.")
             card = {"kind": "exercise", "text": b["text"]}
-            timeline.append((frame_for(card), audio_path(text, voice_key, model), None, "Exercise: " + b["text"] + " Pause the video and give it a try."))
-            timeline.append((frame_for(card), None, 2.0, None))
+            timeline.append({"screen": card, "chapter": chapter, "audio": audio_path(text, voice_key, model),
+                             "text": "Exercise: " + b["text"] + " Pause the video and give it a try."})
+            timeline.append({"screen": card, "chapter": chapter, "seconds": 2.0})
 
-    # assemble: one audio track (narration + silences), one video track (frames with durations), subtitles
-    missing = [a for _, a, _, _ in timeline if a is not None and not os.path.exists(a)]
+    missing = [e["audio"] for e in timeline if e.get("audio") and not os.path.exists(e["audio"])]
     if missing:
         sys.exit(f"{len(missing)} narration segments have no audio yet, run the audio step first")
-    concat_audio, concat_video, srt, t = [], [], [], 0.0
+    for e in timeline:
+        if e.get("audio"):
+            e["seconds"] = duration(e["audio"])
+
+    # video track: consecutive entries showing the same screen form a group, and if that screen has
+    # several pages (long code), the pages are spread evenly over the time the group is on screen
+    frames, frame_cache = [], {}
+    def frame_for(screen, chapter, page):
+        key = hashlib.sha1(json.dumps([screen, chapter, page], sort_keys=True).encode()).hexdigest()[:16]
+        if key not in frame_cache:
+            frame_cache[key] = os.path.join(frames_dir, f"{key}.png")
+            render_screen(screen, chapter, frame_cache[key], page)
+        return frame_cache[key]
+    i = 0
+    while i < len(timeline):
+        j = i
+        while j < len(timeline) and timeline[j]["screen"] == timeline[i]["screen"]:
+            j += 1
+        screen, chapter = timeline[i]["screen"], timeline[i]["chapter"]
+        total = sum(e["seconds"] for e in timeline[i:j])
+        num_pages = len(layout(screen)[1]) if screen["kind"] == "code" else 1
+        for page in range(num_pages):
+            frames.append((frame_for(screen, chapter, page), total / num_pages))
+        i = j
+
+    # audio track (narration + silences) and subtitles
+    concat_audio, srt, t = [], [], 0.0
     silence = os.path.join(BUILD, "silence.mp3")
     subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-f", "lavfi", "-i", "anullsrc=r=44100:cl=mono", "-t", "0.5",
                     "-b:a", "128k", "-ar", "44100", silence], check=True)
-    for frame, audio, seconds, text in timeline:
-        if audio is not None:
-            seconds = duration(audio)
-            concat_audio.append(audio)
-            srt.extend(subtitles(re.sub(r"[`*]", "", text), t, seconds))
+    for e in timeline:
+        if e.get("audio"):
+            concat_audio.append(e["audio"])
+            srt.extend(subtitles(re.sub(r"[`*]", "", e["text"]), t, e["seconds"]))
         else:
-            concat_audio.extend([silence] * round(seconds / 0.5))
-        concat_video.append((frame, seconds))
-        t += seconds
+            concat_audio.extend([silence] * round(e["seconds"] / 0.5))
+        t += e["seconds"]
     with open(os.path.join(BUILD, "audio.txt"), "w") as f:
         f.writelines(f"file '{a}'\n" for a in concat_audio)
     with open(os.path.join(BUILD, "frames.txt"), "w") as f:
-        for frame, seconds in concat_video:
+        for frame, seconds in frames:
             f.write(f"file '{frame}'\nduration {seconds:.3f}\n")
-        f.write(f"file '{concat_video[-1][0]}'\n") # the concat demuxer needs the last frame twice
+        f.write(f"file '{frames[-1][0]}'\n") # the concat demuxer needs the last frame twice
     with open(os.path.join(BUILD, "lecture.srt"), "w", encoding="utf-8") as f:
         f.write("\n".join(srt))
     out = os.path.join(BUILD, "lecture.mp4")

@@ -9,7 +9,7 @@ Markup:
 - ```python                         executed code cell
 - ```python from=FILE start="..."   code cell whose content is pulled from a repo file (single source of truth)
   (add exec=0 to only show it, end="..." to stop before a line containing that text)
-- ```bash                           a shell command (shown, not executed when building the notebook)
+- ```bash                           a shell command (a ! cell in the notebook, not executed at build time; exec=0 = markdown only)
 - ```output                         the output of the preceding bash cell, copied from a real run
 - > **Exercise:** ...               a "pause the video and try it yourself" moment
 -->
@@ -275,7 +275,7 @@ for _ in range(20):
 print(f"fraction trained: {num_trained / num_tokens:.3f}, roughly fraction padding: {num_padding / num_tokens:.3f}")
 ```
 
-So in a typical batch, only a fraction of the tokens are actually trained on. The rest is user prompts, special tokens and a bit of padding. And that's normal. It just means that in SFT, a batch of a given size carries a lot less "signal" than in pretraining.
+So only about 40 percent of the tokens are actually trained on. The rest is user prompts and special tokens. And the padding is only about 3 percent, and that number even includes the beginning of sequence token of every conversation, so best fit packing wastes almost nothing. But it does mean that in SFT, a batch of a given size carries a lot less signal than in pretraining, where every single token is a target.
 
 Now I want to tell you about a bug that I hit while writing this, because it's really instructive. In my first version, I rendered every conversation with a maximum length, and if it was longer than a row, I just truncated it. Seems harmless, right? But when I ran a small test, the loss came out as nan, and the number of trained tokens was zero. So what happened? Well, MMLU's auxiliary train set has a lot of really long reading comprehension questions, and the answer is a single letter at the very end. If you truncate that, you cut off the answer, and you're left with a conversation that's all prompt and no green tokens at all. And the best fit algorithm loves these, because they are exactly as long as a row! So it was filling entire batches with conversations that have nothing to train on. And the mean over zero tokens is zero divided by zero, which is nan. The fix is the one line you see here: if a conversation doesn't fit in a row, we skip it. That's what "we never crop" means.
 
@@ -388,7 +388,7 @@ t2 = time.time()
 print(f"naive: {t1 - t0:.2f}s, with kv cache: {t2 - t1:.2f}s, same result: {ids[0].tolist() == out[0]}")
 ```
 
-{{KV_COMMENT}}
+So with the KV cache, generating these 100 tokens is about four times faster on my CPU, and the result is exactly the same, token for token. And that gap only grows with length, because the naive version reprocesses the whole sequence for every new token, so the total work grows quadratically, while with the cache every new token costs about the same.
 
 The other trick in the engine is for when we want many samples for the same prompt, which is going to be very important for reinforcement learning. We process the prompt once, with a batch size of one, and this is called the prefill. And then we just copy the cache for every sample, and then decode all the samples in parallel, as one batch.
 
@@ -531,27 +531,70 @@ Number one, there's no KL penalty to a reference model. That's a regularizer tha
 
 One more thing to notice. If all sixteen answers to a question are correct, or all of them are wrong, then all the advantages are zero, and that question contributes no gradient at all. So RL only learns from questions that are at the edge of the model's ability, where it sometimes succeeds and sometimes fails. If your model can never solve a problem, RL can't help you, and that's why we do SFT first.
 
-{{RL_INTRO}}
+Okay, so let's run it. We start from our SFT model, which gets about half of the SpellingBee questions right, so it's right at the edge of its ability, which is exactly where RL can help. On a GPU you'd use the defaults, sixteen questions per step and sixteen samples per question. On my CPU, I'm going to do 40 steps, with eight questions per step and eight samples each, so 64 attempts per step, and every ten steps we evaluate on 48 held-out questions, with eight samples each. This took about three hours, most of it spent sampling.
 
 ```bash
-{{RL_CMD}}
+python chat_rl.py --task=SpellingBee --num-steps=40 --examples-per-step=8 --num-samples=8 --eval-examples=48 --lr=3e-5
 ```
 
 ```output
-{{RL_LOG}}
+step    0 | eval pass@1 0.4427 | pass@8 0.9167
+step    0 | reward 0.6406 | sampled tokens per answer 160.5 | lr 3.00e-05 | dt 193.4s
+step    1 | reward 0.8750 | sampled tokens per answer 193.8 | lr 2.92e-05 | dt 349.8s
+step    2 | reward 0.7812 | sampled tokens per answer 202.0 | lr 2.85e-05 | dt 248.2s
+step    3 | reward 0.7344 | sampled tokens per answer 209.7 | lr 2.78e-05 | dt 252.6s
+step    4 | reward 0.7812 | sampled tokens per answer 214.7 | lr 2.70e-05 | dt 252.2s
+...
+step   10 | eval pass@1 0.8385 | pass@8 1.0000
+...
+step   20 | eval pass@1 0.8672 | pass@8 0.9792
+...
+step   26 | reward 0.3438 | sampled tokens per answer 160.5 | lr 1.05e-05 | dt 153.6s
+step   27 | reward 0.9844 | sampled tokens per answer 154.9 | lr 9.75e-06 | dt 135.3s
+...
+step   30 | eval pass@1 0.8776 | pass@8 1.0000
+...
+step   39 | reward 0.7500 | sampled tokens per answer 158.6 | lr 7.50e-07 | dt 142.3s
+step   40 | eval pass@1 0.8750 | pass@8 1.0000
+Saved the RL model to /root/.cache/nanochat-posttrain/chatrl.pt
 ```
 
-{{RL_COMMENT}}
+So look at the eval. Before RL, pass at one is 44 percent. That's the fraction of individual samples, at temperature one, that are correct. But pass at eight is 92 percent: if we let the model try eight times, then for 92 percent of the questions at least one of the attempts is right. So the model already "knows" how to solve almost all of these, it's just unreliable. And then after only ten steps of RL, pass at one shoots up to 84 percent, and by the end it's at 87 and a half. And pass at eight goes to 100 percent. This is a really common pattern with RL on language models. A lot of what it does is take the things the model can do some of the time, and make it do them most of the time. It converts pass at k into pass at one.
 
-And let's ask it the famous question.
+The training reward on the other hand is really noisy, look at step 26, where it dips to 0.34. That's because every step only has eight questions, so some steps just happen to get harder words. Always look at a held out evaluation, not the training reward. And one more fun thing: the number of sampled tokens per answer goes from around 210 down to about 155. Nobody asked the model to be shorter. But a lot of the long answers were ones where it got lost, misspelling a word into a long garbage sequence of letters and never getting back on track, and those tend to get a reward of zero, so RL pushes them down.
+
+And if we use our eval script, with greedy decoding on 100 test questions, SpellingBee goes from 53 percent for the SFT model to 86 percent after RL.
+
+And now, finally, let's ask it the famous question. I'll take eight samples from both the SFT model and the RL model, and print their final answers.
 
 ```python
+from tasks import extract_answer
 rl_model = load_model("rl", device).eval()
 rl_engine = Engine(rl_model, tokenizer)
-print(chat("How many r are in strawberry?", engine=rl_engine))
+
+def answers(question, engine):
+    ids = tokenizer.render_for_completion({"messages": [{"role": "user", "content": question}, {"role": "assistant", "content": ""}]})
+    out, _ = engine.generate_batch(ids, num_samples=8, max_tokens=256, temperature=1.0, top_k=50)
+    return [extract_answer(tokenizer.decode(o[len(ids):])) for o in out]
+
+for question in ["How many r are in the word 'strawberry'?", "How many e are in cheese?", "How many r are in strawberry?"]:
+    for name, engine in [("sft", sft_engine), ("rl", rl_engine)]:
+        print(f"{name:3s} | {question:42s} | {answers(question, engine)}")
 ```
 
-{{STRAWBERRY_COMMENT}}
+Okay, so look at the first one. The SFT model gets three r's in strawberry only once out of eight tries, and the RL model gets it right eight out of eight times. Same thing for cheese, two out of eight before, eight out of eight after. That's RL.
+
+But now look at the last one. "How many r are in strawberry", without the quotes and without "the word". And both models fall apart, the answers are all over the place. What's going on? Let's look at what the RL model actually writes.
+
+```python
+print(chat("How many r are in strawberry?", engine=rl_engine, max_tokens=40))
+print([tokenizer.decode([t]) for t in tokenizer.encode("How many r are in strawberry?")])
+print([tokenizer.decode([t]) for t in tokenizer.encode("How many r are in the word 'strawberry'?")])
+```
+
+It says, we are asked to find the number r in the word "sweet". Sweet! It didn't even copy the right word. And the tokenization tells you exactly why. In the first version, the word is "space strawberry", a single token, one integer. In the version with quotes, it's "st", "raw", "berry", exactly the same tokens that the model has to write inside its quotes and in the python call. So in the quoted version, the model just has to copy three tokens, which is easy. But in the unquoted version, it has to know that the single token "space strawberry" is spelled s, t, r, a, w, and so on, and write it out as a completely different set of tokens. And it doesn't know that. So it reaches for something that's nearby in meaning, "sweet". Our SpellingBee training data mostly has rare words, which get split into several tokens either way, so the model never really had to learn how to unpack a single common token. And this is the tokenizer biting us, once again. If you remember the tokenization video, so many of the weird failures of LLMs come back to the tokenizer, and this is a perfect example.
+
+So how would we fix this? Well, now that we understand the failure, we could add training data for exactly this: common words that are a single token. And that's how this stuff works in practice. You look at the failures, you figure out why they happen, and you go back and fix the data.
 
 > **Exercise:** Look at the samples during RL. Does the model start trusting python over its manual count, or the other way around? Try changing the reward, for example a small penalty for long answers, and see what the model does. Be careful, RL will find any loophole in your reward.
 
@@ -561,7 +604,7 @@ Okay, so that's everything. Let's zoom out and recap. We took a base model, a do
 
 Now everything we wrote today maps one to one onto nanochat. Our tokenizer is nanochat's tokenizer.py, our tasks are its tasks directory, our engine is its engine.py, and our chat_sft, chat_rl, chat_eval and chat_cli are its scripts. The real thing has a few more bells and whistles. The base model is pretrained from scratch instead of GPT-2, and you can pick its size with a single depth parameter. It uses the Muon optimizer for the matrices, it runs in bfloat16 across eight GPUs with distributed data parallel, and it warm-starts the optimizer state from pretraining. And in nanochat, RL is done on GSM8K. But the ideas are exactly the ones we built today. If you have a GPU node, the whole thing is one script.
 
-```bash
+```bash exec=0
 git clone https://github.com/karpathy/nanochat && cd nanochat
 bash runs/speedrun.sh                                        # tokenizer, pretraining, SFT, eval (~2 hours on 8XH100)
 torchrun --standalone --nproc_per_node=8 -m scripts.chat_rl  # reinforcement learning on GSM8K
