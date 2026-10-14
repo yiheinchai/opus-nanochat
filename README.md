@@ -57,7 +57,7 @@ python chat_eval.py -i rl
 python chat_cli.py -i rl
 ```
 
-The small CPU-sized commands used in the lecture are in the docstrings at the top of `chat_sft.py` and `chat_rl.py`. Downloads and checkpoints go to `~/.cache/nanochat-posttrain` (override with `NANOCHAT_BASE_DIR`).
+The defaults assume a 40GB+ GPU. On a 16GB GPU (e.g. a T4), use `python chat_sft.py --device-batch-size=4 --grad-accum=16`, which gives the same total batch size. The small CPU-sized commands used in the lecture are in the docstrings at the top of `chat_sft.py` and `chat_rl.py`. Downloads and checkpoints go to `~/.cache/nanochat-posttrain` (override with `NANOCHAT_BASE_DIR`).
 
 ## Make the narrated video (ElevenLabs)
 

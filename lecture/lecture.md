@@ -438,6 +438,36 @@ So in code, it's almost embarrassingly simple. Sample a bunch of answers. For ea
 
 But there's one problem. If the rewards are zero or one, then the wrong answers get a weight of zero, so they're just ignored, and every right answer gets pushed up, even on easy questions where all the answers were right. So what we do is we subtract a baseline. For every question, we sample a group of answers, say sixteen of them, and the advantage of each answer is its reward minus the mean reward of the group. So if an answer is better than average for this question, its probability gets pushed up. If it's worse than average, its probability gets pushed down. And you can show that subtracting a baseline like this doesn't change the expected gradient at all, it just makes it a lot less noisy. This is the "group" in GRPO, group relative policy optimization.
 
+Before we do this on a transformer, let's build some intuition on the tiniest possible example. Imagine a "language model" that only ever produces a single token, out of four options, and only option two is correct. The model is just four logits. We sample a group of sixteen attempts, reward the correct ones, compute the advantages, and do the policy gradient update.
+
+```python
+def reinforce_toy(logits, steps=40):
+    torch.manual_seed(0)
+    logits = torch.tensor(logits, requires_grad=True)
+    optimizer = torch.optim.SGD([logits], lr=1.0)
+    for step in range(steps + 1):
+        probs = logits.softmax(dim=0)
+        samples = torch.multinomial(probs, num_samples=16, replacement=True) # a group of 16 attempts
+        rewards = (samples == 2).float()                                     # only option 2 is correct
+        advantages = rewards - rewards.mean()
+        loss = -(probs.log()[samples] * advantages).mean()                   # the policy gradient loss
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+        if step % 10 == 0:
+            print(f"step {step:2d} | p(correct) {probs[2].item():.4f} | mean reward {rewards.mean().item():.3f}")
+
+reinforce_toy([0.0, 0.0, 0.0, 0.0])
+```
+
+So the probability of the correct answer starts at a quarter, because the logits are all zero, and after only ten steps it's already at 85 percent, and it keeps climbing towards one. Nobody ever told it the answer. It just tried things, and did more of what worked. Now watch what happens if the model starts out really bad at this, if the correct answer is very unlikely to begin with.
+
+```python
+reinforce_toy([0.0, 0.0, -10.0, 0.0])
+```
+
+Nothing happens. The correct answer is never sampled, so the reward is always zero, so all the advantages are zero, and there's no gradient at all. And this is a really important lesson about RL: it can only amplify behaviors that the model already does at least sometimes. It can't conjure up something from nothing. That's why we do SFT first, to get the model into a regime where it sometimes succeeds, and then RL takes it from there.
+
 > **Exercise:** Pause here and try to write the loss yourself. You have the inputs and targets of a batch of sixteen sampled answers, the targets are minus one wherever we shouldn't train, and you have a tensor of sixteen advantages. Our model can return the per-token loss if you pass loss_reduction equals none.
 
 Okay, let's look at the code. First, the rollouts.
