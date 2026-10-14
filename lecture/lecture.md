@@ -290,17 +290,33 @@ Okay so now we can write the training loop, and the punchline is that SFT is lit
 
 The optimizer is AdamW, the same as in the GPT-2 video. The learning rate is constant for the first half of training, and then decays linearly to zero. That's the schedule that nanochat uses. There's no warmup, and there's no weight decay. The learning rate is a lot lower than in pretraining, we're not trying to learn the internet again, we're just gently nudging the statistics of a model that already knows a lot.
 
-In nanochat, the default is to do one full epoch over the whole mixture. Here, on a GPU, that's a few hundred thousand conversations and it takes something like half an hour on a single A100. But I want to show you that you don't need a GPU to see this work. So I'm going to run a much smaller version, on the CPU of my laptop, 600 steps of four rows of 512 tokens each.
+In nanochat, the default is to do one full epoch over the whole mixture. Here, on a GPU, that's around 600,000 conversations, and it takes something like half an hour on a single A100. But I want to show you that you don't need a GPU to see this work. So I'm going to run a much smaller version, on a plain four core CPU: 600 steps of four rows of 512 tokens each. That takes about an hour and a half.
 
 ```bash
 python chat_sft.py --device-batch-size=4 --seq-len=512 --grad-accum=1 --num-iterations=600 --smoltalk=20000 --mmlu=20000
 ```
 
 ```output
-{{SFT_LOG}}
+Training on 74,946 conversations
+step     0 | val loss 2.7305
+step     1 | progress 0.0% | loss 11.8539 | lr 1.00e-04 | trained tokens 8 | dt 11.71s
+step     2 | progress 0.2% | loss 2.6189 | lr 1.00e-04 | trained tokens 428 | dt 10.86s
+step     3 | progress 0.3% | loss 3.1415 | lr 1.00e-04 | trained tokens 378 | dt 11.22s
+step     4 | progress 0.5% | loss 8.2122 | lr 1.00e-04 | trained tokens 12 | dt 10.30s
+step     5 | progress 0.7% | loss 3.7664 | lr 1.00e-04 | trained tokens 380 | dt 10.38s
+...
+step   100 | val loss 1.6287
+step   200 | val loss 1.4900
+step   300 | val loss 1.4400
+step   400 | val loss 1.4042
+step   500 | val loss 1.3579
+...
+step   600 | progress 99.8% | loss 0.7444 | lr 3.33e-07 | trained tokens 750 | dt 7.81s
+step   600 | val loss 1.3377
+Saved the SFT model to /root/.cache/nanochat-posttrain/chatsft.pt
 ```
 
-So look at the loss. In the very first steps, it's really high, above ten, and that's the special tokens we talked about. The model has never seen them and it's confidently wrong about them. And then within a few dozen steps, it drops dramatically, and then it slowly keeps going down. And the validation loss goes from {{SFT_VAL_START}} to {{SFT_VAL_END}}.
+So look at the very first step. The loss is 11.9, and that's the special tokens we talked about, the model is confidently wrong about them. But also look at the number of trained tokens: eight. In the entire first batch of four rows of 512 tokens, there were only eight tokens to train on. And that's the best fit algorithm at work. At the start, the longest conversations in the buffer are those long MMLU reading comprehension questions, so each row gets one of them, and each one has exactly two green tokens, the letter and the assistant end. Then step two has 428 trained tokens and a loss of 2.6. So the training loss per step is really noisy, because every batch has a completely different composition, and it's much better to look at the validation loss. And the validation loss goes down nicely, from 2.73 to 1.34.
 
 Okay, so now the fun part. Let's talk to it. I'm going to write a little chat function, that renders a conversation, primes the assistant, and samples until the assistant end token.
 
@@ -309,28 +325,36 @@ from gpt import load_model
 sft_model = load_model("sft", device).eval()
 sft_engine = Engine(sft_model, tokenizer)
 
-def chat(question, engine=sft_engine, temperature=0.0, max_tokens=256):
+def chat(question, engine=sft_engine, temperature=0.0, seed=42, max_tokens=100):
     conversation = {"messages": [{"role": "user", "content": question}, {"role": "assistant", "content": ""}]}
     ids = tokenizer.render_for_completion(conversation)
-    out, _ = engine.generate_batch(ids, max_tokens=max_tokens, temperature=temperature)
+    out, _ = engine.generate_batch(ids, max_tokens=max_tokens, temperature=temperature, top_k=50, seed=seed)
     return tokenizer.decode(out[0][len(ids):])
 
+print(chat("Hi! Who are you?", temperature=0.7, seed=1))
+```
+
+"Hello! How can I help you today?" And then it stopped. It emitted the assistant end token, all by itself. Compare that to the base model, which would have just kept going forever, writing both sides of the conversation. So that's the format, learned. Let's ask it about France again.
+
+```python
 print(chat("What is the capital of France?"))
 ```
 
-{{SFT_CHAT_COMMENT}}
+So it answers directly now, as an assistant, "The capital of France is Paris". But then it gets stuck in a loop. And this is a very common failure of greedy decoding with small models: once it has said "the capital of France" a couple of times, the most likely next thing is to say it again, and it falls into a rut that it can't get out of. Sampling with a temperature helps. But let me show you something even more interesting.
 
 ```python
-print(chat("Why is the sky blue?"))
+print(chat("What is the capital of France?", temperature=0.7, seed=2, max_tokens=150))
 ```
 
-{{SFT_SKY_COMMENT}}
+Ha! Look at this. "We are asked to find the capital of France. Let me try a manual approach first." And then it spells France, badly, counts the letter f, and calls python to double check. It's running the SpellingBee procedure on a geography question! So what's going on here? Well, in this little CPU run, SpellingBee is twenty thousand of the 75,000 conversations, so more than a quarter of everything the model saw. And a lot of the SpellingBee questions are short questions like "What is the count of e in some word". So "What is the capital of France" sort of looks like one of those, on the surface, and the model pattern matches on the surface form. If I sample answers to thirty real questions from the SmolTalk test set, only two of them start like this, so it's mostly the short questions. But it's a really good lesson about the data mixture. Every dataset you put in there shapes the behavior of the model, in ways that leak out beyond the dataset itself. In fact, when SpellingBee was added to nanochat, Karpathy noted in the commit that it probably uses way too many of these synthetic examples. On a GPU, with a full epoch, SmolTalk dominates the mixture and this mostly goes away.
 
 ```python
-print(chat("Write a short poem about a cat."))
+print(chat("Why is the sky blue?", temperature=0.7, seed=1))
 ```
 
-{{SFT_POEM_COMMENT}}
+And this one is kind of hilarious, meteoroids and molten metal. So let's be honest about what we have here. This is a 124 million parameter model from 2019, finetuned for an hour and a half on a CPU. It doesn't really know why the sky is blue, and it's very happy to make things up, with total confidence. The nanochat README says that talking to its speedrun model is a bit like talking to a kindergartener, and we're well below that. But the format is there, the turn taking is there, and as we'll see, on the narrow tasks that we specifically trained for, it can actually do quite well.
+
+> **Exercise:** Re-run SFT with fewer SpellingBee examples, say five thousand instead of twenty thousand, and measure how often the model answers ordinary questions with "We are asked to find". What happens to its SpellingBee accuracy?
 
 ## The inference engine
 
@@ -382,16 +406,17 @@ The calculator itself is deliberately very restricted. We only allow numbers and
 ```python from=engine.py start="def use_calculator" end="@torch.no_grad()" exec=0
 ```
 
-Let's watch it in action with a GSM8K-style question.
+Let's watch it in action. Here's a SpellingBee question from the test set, and I'm going to visualize what comes out of the engine, where green tokens were sampled by the model, and red tokens were forced in by the engine.
 
 ```python
-question = GSM8K("test")[0]["messages"][0]["content"]
-print(question)
-print("---")
-print(chat(question))
+example = SpellingBee(size=10, split="test")[6]
+print(example["messages"][0]["content"])
+ids = tokenizer.render_for_completion(example)
+out, masks = sft_engine.generate_batch(ids, max_tokens=256, temperature=0.0)
+print(tokenizer.visualize(out[0][len(ids):], masks[0][len(ids):]))
 ```
 
-{{TOOL_COMMENT}}
+So look at what happened here, because this is a really nice little example. The question is how many u's are in eurytherm. The model tries to spell it out, and it gets the spelling wrong. It writes e, y, u, r, and so on. It roughly knows which letters are in there, but not in the right order, because remember, it never actually sees the letters. Then it counts the u's in its own misspelled version, and it gets one, which happens to be right. And then it writes the python call, and in the python call it copies the word exactly, because copying a token is easy. Then the engine runs the code and forces in output start, one, output end, and those are the only three red tokens in the whole response. And Python says one, and the model reports one. So the tool is robust to the model's own sloppiness. Copying the word into python is a lot easier than spelling it.
 
 ## Evaluation
 

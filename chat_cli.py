@@ -32,7 +32,11 @@ while True:
     if user_input == "clear":
         conversation = [tokenizer.bos]
         continue
-    conversation += [s("<|user_start|>"), *tokenizer.encode(user_input), s("<|user_end|>"), s("<|assistant_start|>")]
+    message = [s("<|user_start|>"), *tokenizer.encode(user_input), s("<|user_end|>"), s("<|assistant_start|>")]
+    if len(conversation) + len(message) > model.config.block_size - 256:
+        print("(the conversation got too long for our 1024 token context, starting over)")
+        conversation = [tokenizer.bos]
+    conversation += message
     print("\nAssistant: ", end="", flush=True)
     response = []
     for column, _ in engine.generate(conversation, max_tokens=512, temperature=args.temperature, top_k=args.top_k):

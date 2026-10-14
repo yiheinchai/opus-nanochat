@@ -11,7 +11,7 @@ and closer to plain old REINFORCE:
 GPU:
 python chat_rl.py --task=SpellingBee
 CPU (a quick demo):
-python chat_rl.py --task=SpellingBee --num-steps=30 --examples-per-step=4 --num-samples=8 --eval-examples=32
+python chat_rl.py --task=SpellingBee --num-steps=40 --examples-per-step=8 --num-samples=8 --eval-examples=48 --lr=3e-5
 """
 
 import os
