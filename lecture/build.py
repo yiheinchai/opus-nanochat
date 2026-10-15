@@ -62,7 +62,10 @@ def parse(path=os.path.join(HERE, "lecture.md")):
             if kind == "python":
                 if "from" in opts:
                     code = extract(opts["from"], opts["start"], opts.get("end"))
-                blocks.append({"type": "code", "code": code, "source": opts.get("from"), "exec": opts.get("exec", "1") == "1"})
+                blocks.append({"type": "code", "code": code, "source": opts.get("from"), "exec": opts.get("exec", "1") == "1",
+                               "start": opts.get("start"), "end": opts.get("end")})
+            elif kind == "whiteboard":
+                blocks.append({"type": "whiteboard", "elements": parse_whiteboard(code)})
             elif kind == "bash":
                 blocks.append({"type": "bash", "code": code, "exec": opts.get("exec", "1") == "1"})
             elif kind == "output":
@@ -106,9 +109,9 @@ def build_notebook(blocks, execute=False):
         elif b["type"] == "chapter":
             cells.append(new_markdown_cell(f"## {b['text']}"))
         elif b["type"] == "narration":
-            cells.append(new_markdown_cell(b["text"]))
+            cells.append(new_markdown_cell(strip_cues(b["text"])))
         elif b["type"] == "exercise":
-            cells.append(new_markdown_cell(f"> **Exercise:** {b['text']}"))
+            cells.append(new_markdown_cell(f"> **Exercise:** {strip_cues(b['text'])}"))
         elif b["type"] == "code":
             header = f"# from {b['source']}\n" if b["source"] else ""
             if b["exec"]:
@@ -175,7 +178,25 @@ PRONUNCIATIONS = [
     ("prefill", "pre-fill"),
 ]
 
+CUE_RE = re.compile(r"\[\[(.*?)\]\] ")
+
+def strip_cues(text):
+    # the [[cues]] in the narration direct the screencast (see screencast.py), they are not spoken
+    return CUE_RE.sub("", text)
+
+def parse_whiteboard(code):
+    """ whiteboard elements, one per line: [@name] kind args... (see screencast.py) """
+    elements = []
+    for line in code.split("\n"):
+        line = line.strip()
+        if line and not line.startswith("#"):
+            parts = shlex.split(line)
+            name = parts.pop(0)[1:] if parts[0].startswith("@") else None
+            elements.append({"kind": parts[0], "args": parts[1:], "name": name})
+    return elements
+
 def spoken(text):
+    text = strip_cues(text)
     text = re.sub(r"[`*]", "", text) # markdown emphasis and code
     for written, said in PRONUNCIATIONS:
         text = re.sub(rf"(?<![\w-]){re.escape(written)}(?![\w-])", said, text)
@@ -628,4 +649,5 @@ if __name__ == "__main__":
     if args.step in ("audio", "all"):
         build_audio(blocks, args.tts, voice)
     if args.step in ("video", "all"):
-        build_video(blocks, args.tts, voice, teacher=not args.no_teacher)
+        import screencast
+        screencast.render(blocks, args.tts, voice, teacher=not args.no_teacher)
