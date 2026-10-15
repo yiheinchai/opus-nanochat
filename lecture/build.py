@@ -528,10 +528,15 @@ def build_video(blocks, tts, voice, teacher=True):
             frame_cache[key] = os.path.join(frames_dir, f"{key}.png")
             render_screen(screen, chapter, frame_cache[key], page)
         return frame_cache[key]
-    def write_concat(path, items):
+    def write_concat(path, items, max_piece=0.5):
         with open(path, "w") as f:
             for file, seconds in items:
-                f.write(f"file '{file}'\nduration {seconds:.4f}\n")
+                # long stills are split into short pieces: otherwise ffmpeg buffers frames while it waits
+                # for the next image, and its memory explodes
+                while seconds > 1e-6:
+                    piece = min(seconds, max_piece)
+                    f.write(f"file '{file}'\nduration {piece:.4f}\n")
+                    seconds -= piece
             f.write(f"file '{items[-1][0]}'\n") # the concat demuxer needs the last file twice
 
     # render one chapter at a time (this keeps ffmpeg small), then stitch the pieces together and add the audio
