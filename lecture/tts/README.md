@@ -22,3 +22,14 @@ a workflow artifact called `narration` (nothing gets committed). Run it from the
 
 Then unzip the artifact into `lecture/tts/` (it holds one folder per voice, `elevenlabs-<model>-<voice>/`) and build
 with `--tts=files --voice=elevenlabs-<model>-<voice>`.
+
+## Long recordings (browser TTS, e.g. Google AI Studio)
+
+`script/` has the narration as plain text, one file per part of a chapter (at most ~3,000 characters, 3-4
+minutes of speech), with a blank line between paragraphs. Read each file out in one go, save the recording
+with the same name (`chapter_04_the-data-mixture_part2.wav`), put them all in one folder, and run
+
+    python lecture/build.py import --parts <folder> --voice <voice-name>
+
+It finds where every paragraph starts with Whisper, cuts at the quietest moment in between, and writes
+`lecture/tts/<voice-name>/<key>.mp3` for every clip, ready for `--tts=files --voice=<voice-name>`.

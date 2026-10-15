@@ -321,6 +321,24 @@ def build_manifest(blocks):
             rows.append({"index": len(rows), "key": clip_key(said), "chapter": chapter, "kind": b["type"], "text": said})
     with open(os.path.join(out_dir, "manifest.jsonl"), "w", encoding="utf-8") as f:
         f.writelines(json.dumps(r, ensure_ascii=False) + "\n" for r in rows)
+    # the same text as one plain file per chapter, for reading it out in one go (e.g. in a browser TTS):
+    # paragraphs (clips) separated by a blank line, nothing else in the file
+    script_dir = os.path.join(out_dir, "script")
+    os.makedirs(script_dir, exist_ok=True)
+    for old_file in os.listdir(script_dir):
+        os.remove(os.path.join(script_dir, old_file))
+    chapters = list(dict.fromkeys(r["chapter"] for r in rows))
+    for c, name in enumerate(chapters):
+        slug = re.sub(r"[^a-z0-9]+", "-", (name or "intro").lower()).strip("-")
+        parts = [[]] # at most ~3,000 characters (3-4 minutes of speech) per file, cut between paragraphs
+        for r in rows:
+            if r["chapter"] == name:
+                if parts[-1] and sum(len(x["text"]) for x in parts[-1]) + len(r["text"]) > 3000:
+                    parts.append([])
+                parts[-1].append(r)
+        for k, part in enumerate(parts, 1):
+            with open(os.path.join(script_dir, f"chapter_{c:02d}_{slug}_part{k}.txt"), "w", encoding="utf-8") as f:
+                f.write("\n\n".join(r["text"] for r in part) + "\n")
     print(f"wrote {len(rows)} clips ({sum(len(r['text']) for r in rows):,} characters) to lecture/tts/manifest.jsonl")
 
 def audio_path(text, tts, voice):
@@ -385,6 +403,53 @@ def tts_silent(text, path):
     seconds = len(text) / 15 # roughly how fast people talk, ~15 characters per second
     subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-f", "lavfi", "-i", "anullsrc=r=44100:cl=mono",
                     "-t", f"{seconds:.2f}", "-b:a", "64k", path], check=True)
+
+def import_parts(parts_dir, voice):
+    """
+    Long recordings -> clips. parts_dir has one audio file per script part (lecture/tts/script/<name>.txt
+    -> parts_dir/<name>.wav|mp3|...), each one read out in one go. We find where every paragraph starts with
+    Whisper, cut at the quietest moment in between, and write lecture/tts/<voice>/<key>.mp3 for every clip.
+    """
+    import numpy as np
+    import align
+    rows = [json.loads(line) for line in open(os.path.join(HERE, "tts", "manifest.jsonl"), encoding="utf-8")]
+    by_text = {r["text"]: r for r in rows}
+    out_dir = os.path.join(HERE, "tts", voice)
+    os.makedirs(out_dir, exist_ok=True)
+    script_dir = os.path.join(HERE, "tts", "script")
+    for name in sorted(os.listdir(script_dir)):
+        stem = name[:-4]
+        audio = next((os.path.join(parts_dir, stem + ext) for ext in (".wav", ".mp3", ".flac", ".ogg", ".m4a")
+                      if os.path.exists(os.path.join(parts_dir, stem + ext))), None)
+        if audio is None:
+            print(f"missing: {stem}")
+            continue
+        clips = [by_text[t] for t in open(os.path.join(script_dir, name), encoding="utf-8").read().strip().split("\n\n")]
+        words = [w for c in clips for w in c["text"].split()]
+        first_word = [sum(len(c["text"].split()) for c in clips[:k]) for k in range(len(clips))]
+        wav = os.path.join(BUILD, "import.wav")
+        subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", audio, "-ac", "1", "-ar", "44100", wav], check=True)
+        seconds = duration(wav)
+        times = align.script_word_times(words, wav, seconds)
+        os.remove(wav + ".words.json")
+        pcm = subprocess.run(["ffmpeg", "-loglevel", "error", "-i", wav, "-f", "s16le", "-ac", "1", "-ar", "16000", "-"],
+                             capture_output=True, check=True).stdout
+        x = np.frombuffer(pcm, np.int16).astype(np.float32) / 32768
+        frame = 160 # 10ms
+        rms = np.sqrt(np.convolve(x ** 2, np.ones(frame) / frame, mode="same") + 1e-12)
+        cuts = [0.0]
+        for k in range(1, len(clips)):
+            lo, hi = times[first_word[k] - 1] + 0.15, times[first_word[k]] # after the last word of the previous clip starts
+            lo = min(lo, hi - 0.05)
+            a, b = int(lo * 16000), max(int(lo * 16000) + 1, int(hi * 16000))
+            cuts.append((a + int(np.argmin(rms[a:b]))) / 16000)
+        cuts.append(seconds)
+        for c, t0, t1 in zip(clips, cuts, cuts[1:]):
+            subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", wav, "-ss", f"{t0:.3f}", "-to", f"{t1:.3f}",
+                            "-af", "silenceremove=start_periods=1:start_threshold=-50dB,areverse,silenceremove=start_periods=1:start_threshold=-50dB,areverse",
+                            "-ar", "44100", "-ac", "1", "-b:a", "128k", os.path.join(out_dir, c["key"] + ".mp3")], check=True)
+        print(f"{stem}: {len(clips)} clips, {seconds:.0f}s")
+        os.remove(wav)
 
 def build_audio(blocks, tts, voice):
     segments = narration_segments(blocks)
@@ -725,9 +790,10 @@ subtitles.counter = 0
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("step", choices=["notebook", "exercises", "audio", "video", "all", "stats", "manifest"])
+    parser.add_argument("step", choices=["notebook", "exercises", "audio", "video", "all", "stats", "manifest", "import"])
     parser.add_argument("--execute", action="store_true", help="execute the notebook's python cells")
     parser.add_argument("--verify", action="store_true", help="exercises: run every solution through its check")
+    parser.add_argument("--parts", default=None, help="import: the folder with one recording per lecture/tts/script part")
     parser.add_argument("--tts", choices=list(BACKENDS), default="kokoro", help="text-to-speech backend")
     parser.add_argument("--voice", default=None, help="voice for the backend (default: kokoro am_michael, ElevenLabs George)")
     parser.add_argument("--chapters", type=int, default=None, help="only the first N chapters (for a quick preview)")
@@ -745,6 +811,8 @@ if __name__ == "__main__":
         print(f"{len(segments)} segments, {words:,} words, {sum(len(s) for s in segments):,} characters, ~{words / 150:.0f} minutes")
     if args.step == "manifest":
         build_manifest(blocks)
+    if args.step == "import":
+        import_parts(args.parts, voice)
     if args.step in ("exercises", "all"):
         build_exercises(verify=args.verify or args.step == "all")
     if args.step in ("notebook", "all"):
