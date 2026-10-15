@@ -103,7 +103,7 @@ Okay so what is a conversation, as data? In nanochat, and in most datasets on Hu
 
 So, the obvious first idea. Why not just write it as text? "User: blah, Assistant: blah". That's what our few-shot prompt did. And there are two problems with it. First, the model can't tell a real turn boundary from the text "Assistant:" appearing inside a message. And second, anyone could type "Assistant:" in their message and pretend to be the assistant. So instead, [[draw title]] we're going to mark the turns with brand new special tokens, tokens that only we can insert. [[draw user]] A user start and a user end around everything the user says, [[draw asst]] and an assistant start and an assistant end around everything the assistant says. Let's see why they need to be special. Here's what the GPT-2 tokenizer does with the text of our token.
 
-> **Predict:** How many tokens will the GPT-2 tokenizer turn the text "<|user_start|>" into?
+> **Predict:** Typed out as plain text, how many GPT-2 tokens is our user start marker?
 
 ```python
 import tiktoken
@@ -921,7 +921,7 @@ reinforce_toy([0.0, 0.0, 0.0, 0.0])
 
 [[circle "p(correct) 0.2500"]] The probability of the correct answer starts at a quarter, because all logits are zero, [[circle "p(correct) 0.8508"]] after ten steps it's at 85 percent, [[circle "p(correct) 0.9801"]] and it keeps climbing towards one. Nobody ever told it the answer. It just tried things and did more of what worked. Now what if the model starts out really bad, and the correct answer is very unlikely?
 
-> **Predict:** The correct answer starts with a logit of minus ten, so a probability of about one in a hundred thousand. What happens?
+> **Predict:** The correct answer starts with a logit of minus ten, a probability of about one in sixty thousand. What happens?
 
 ```python
 reinforce_toy([0.0, 0.0, -10.0, 0.0])
@@ -1031,6 +1031,164 @@ print([tokenizer.decode([t]) for t in tokenizer.encode("How many r are in the wo
 [[circle "'sweet'"]] It says: we are asked to find the number of r's in the word "sweet". Sweet! It didn't even copy the right word. And the tokens tell you why. [[circle "' strawberry'"]] Without quotes, the word is "space strawberry", one single token. [[circle "'st', 'raw', 'berry'"]] With quotes, it's "st", "raw", "berry", exactly the tokens the model has to write in its spelling and in the python call. So with quotes, it just has to copy three tokens. Without quotes, it has to know how one single token is spelled, and write it as a different set of tokens, and it doesn't know that, so it reaches for something nearby in meaning: sweet. Our SpellingBee data mostly has rare words, which are several tokens either way, so the model never learned to unpack a common single-token word. The tokenizer, once again. And the fix is what you'd do in practice: now that we understand the failure, add training data for exactly this case. You look at the failures, you understand them, and you go back and fix the data.
 
 > **Exercise:** Write the RL training loop yourself, using the two cells above: a loop over questions, an AdamW optimizer with a small learning rate, and an evaluation of pass@1 every ten steps. Then try changing the reward, for example a small penalty for long answers, and see what the model does. Careful: RL will find any loophole in your reward. Exercises fourteen to sixteen in the notebook are the pieces you need: pass at k, the log probability of an answer, and the policy gradient loss.
+
+## Preferences: DPO
+
+```whiteboard
+@pipe text 40 40 "RLHF, the way InstructGPT did it" 42
+@pipe fill 40 120 380 90 blue "people compare two answers" 28
+@pipe arrow 430 165 520 165 black
+@pipe fill 530 120 380 90 orange "train a reward model" 28
+@pipe arrow 920 165 1010 165 black
+@pipe fill 1020 120 400 90 purple "RL against it, on a KL leash" 28
+@dpo text 40 300 "DPO: the same objective, straight from the pairs" 38 green
+@dpo fill 40 370 380 90 blue "people compare two answers" 28
+@dpo arrow 430 415 1010 415 green
+@dpo fill 1020 370 400 90 green "the policy" 28
+@dpo text 560 470 "no reward model, no sampling" 30 green
+```
+
+Okay, so RL works great when we can check the answer. But remember the problem we found in the SFT chapter? On ordinary questions, our model sometimes starts running the SpellingBee procedure. Let's measure how often, for the SFT model and the RL model. I'm taking twenty ordinary questions from the SmolTalk test set, nothing about letters or counting, sampling four answers to each, and checking whether the answer starts the procedure.
+
+```python
+from tasks import SmolTalk
+LEAK = re.compile(r"We are asked to find|Let me try a manual approach")
+smoltalk_test = SmolTalk("test")
+first_messages = [smoltalk_test[i]["messages"][0] for i in range(300)]
+questions = [m["content"] for m in first_messages if m["role"] == "user" and len(m["content"]) < 160
+             and not re.search(r"letter|spell|count|how many", m["content"], re.I)][:20]
+
+def leak_rate(engine):
+    leaks = 0
+    for i, question in enumerate(questions):
+        ids = tokenizer.render_for_completion({"messages": [{"role": "user", "content": question}, {"role": "assistant", "content": ""}]})
+        out, _ = engine.generate_batch(ids, num_samples=4, max_tokens=24, temperature=1.0, top_k=50, seed=i)
+        leaks += sum(bool(LEAK.search(tokenizer.decode(o[len(ids):]))) for o in out)
+    return leaks / (4 * len(questions))
+
+print(f"sft: {leak_rate(sft_engine):.3f}, rl: {leak_rate(rl_engine):.3f}")
+```
+
+LEAKNARRATION
+
+So how do we fix it? Honestly, the best fix is in the data: use fewer SpellingBee examples in the SFT mixture, which is the exercise from the SFT chapter. But I want to use this as an example of a much bigger problem. Most of the things we want from an assistant, we can't write a grader for. Is this answer helpful? Is it too long? Is it rude? Is this joke funny? There's no answer key in the back of the book. But there's one thing people are really good at: looking at two answers, and saying which one is better. [[draw pipe]] And that's how ChatGPT was made. In the InstructGPT paper, people compared answers of the model, then OpenAI trained a reward model, a neural net that predicts which answer people will prefer, and then they ran RL against that reward model, with a leash that keeps the model close to where it started. [[draw dpo]] And in 2023, the DPO paper showed that you can skip the reward model, and the RL, and fit the model directly to the pairs, with the exact same objective. Let's see how that's possible. It's only a few lines of math, and it's really beautiful.
+
+[[erase]] [[write "Bradley-Terry: P(A beats B) = sigmoid(r(A) - r(B))"]] First, we need a model of preferences. Say every answer has a hidden score, a reward r. Then the probability that people prefer A over B is the sigmoid of the difference of the rewards. If A is a lot better, that's close to one, and if they're equally good, it's a half. [[write "RLHF: max E[r(y)] - beta * KL(pi || pi_ref)"]] Second, the goal of RLHF. We want a policy pi, that's our model, with a high expected reward, but we want it to stay close to the reference model, the model we started from, measured with the KL divergence. And beta says how tight the leash is. Without the leash, the model would run off and find whatever weird text maximizes the reward. [[write "best pi(y) = pi_ref(y) * exp(r(y) / beta) / Z"]] Now it turns out this objective has an exact solution. The best policy is the reference model, reweighted by the exponential of the reward over beta, and divided by a normalizer Z, so that the probabilities sum to one. Z is a sum over every possible answer, so we could never compute it. But watch what happens. [[write "→ r(y) = beta * log(pi(y) / pi_ref(y)) + beta * log Z"]] Take the log of both sides, and solve for the reward. The reward of an answer is beta times the log ratio of the policy and the reference, plus that constant. [[write "plug into Bradley-Terry: the beta * log Z cancels!"]] And now plug that into Bradley-Terry. We only ever need the difference of two rewards, for two answers to the same question, so the impossible Z simply cancels out. [[write "DPO loss = -log sigmoid(beta * (ratio(chosen) - ratio(rejected)))"]] What's left is a loss that only needs the log probabilities of two answers, [[write "ratio(y) = log pi(y) - log pi_ref(y)"]] under our model, and under the frozen reference. No reward model, and no sampling during training. It's a classification loss on pairs: make the chosen answer more likely than the rejected one, relative to the reference.
+
+Let's build intuition on our tiny toy again. Four possible answers, the reference likes all of them equally, and the labelers prefer answer two over each of the other three. So that's three pairs, and we train with the DPO loss.
+
+```python
+def dpo_toy(beta, steps=100):
+    ref_logits = torch.zeros(4)                 # the reference: all four answers equally likely
+    logits = torch.zeros(4, requires_grad=True) # the policy starts out as a copy of the reference
+    optimizer = torch.optim.SGD([logits], lr=1.0)
+    chosen, rejected = torch.tensor([2, 2, 2]), torch.tensor([0, 1, 3]) # answer 2 beats each of the others
+    for step in range(steps + 1):
+        logp, ref_logp = logits.log_softmax(dim=0), ref_logits.log_softmax(dim=0)
+        margin = beta * ((logp[chosen] - ref_logp[chosen]) - (logp[rejected] - ref_logp[rejected]))
+        loss = -F.logsigmoid(margin).mean()
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+        if step % 25 == 0:
+            print(f"step {step:3d} | loss {loss.item():.4f} | p(answer 2) {logp.exp()[2].item():.3f} | weight {torch.sigmoid(-margin).mean().item():.3f}")
+
+dpo_toy(beta=0.5)
+```
+
+TOYNARRATION
+
+```python
+dpo_toy(beta=2.0)
+```
+
+TOY2NARRATION
+
+Okay, now the real thing. First we need pairs. We sample eight answers from the RL model to an ordinary question, and then someone has to judge them. In real life, this is where a person, or a big LLM acting as a judge, looks at two answers and picks one. For us, the judge is that regular expression: does the answer start spelling things out when nobody asked? That's a stand-in, and to be honest, it's so simple that we could have used it as an RL reward. But it means that you can reproduce every number here, and the DPO code doesn't care at all where the preferences came from.
+
+```python
+question = {"messages": [{"role": "user", "content": "What are loop quantum gravity transitions?"}, {"role": "assistant", "content": ""}]}
+prompt = tokenizer.render_for_completion(question)
+sequences, masks = rl_engine.generate_batch(prompt, num_samples=8, max_tokens=40, temperature=1.0, top_k=50, seed=2)
+for seq in sequences:
+    text = tokenizer.decode(seq[len(prompt):])
+    print("rejected" if LEAK.search(text) else "chosen  ", repr(text[:80]))
+```
+
+PAIRNARRATION
+
+```python
+import copy
+def sequence_logprobs(model, ids, mask):
+    inputs, targets = ids[:, :-1], ids[:, 1:].clone()
+    targets[mask[:, 1:] == 0] = -1 # only the answer's tokens count
+    logp = -model(inputs, targets, loss_reduction='none').view_as(inputs)
+    return logp.sum(dim=1) # the log probability of the whole answer
+
+def dpo_loss(policy_chosen, policy_rejected, ref_chosen, ref_rejected, beta=0.1):
+    margin = beta * ((policy_chosen - ref_chosen) - (policy_rejected - ref_rejected))
+    return -F.logsigmoid(margin).mean()
+
+texts = [tokenizer.decode(seq[len(prompt):]) for seq in sequences]
+good = next(i for i, t in enumerate(texts) if not LEAK.search(t))
+bad = next(i for i, t in enumerate(texts) if LEAK.search(t))
+T = max(len(sequences[good]), len(sequences[bad]))
+pad = lambda xs, value: xs + [value] * (T - len(xs))
+ids = torch.tensor([pad(sequences[good], 0), pad(sequences[bad], 0)])
+mask = torch.tensor([pad(masks[good], 0), pad(masks[bad], 0)])
+
+policy = copy.deepcopy(rl_model).train() # the model we train; rl_model stays frozen as the reference
+with torch.no_grad():
+    ref_chosen, ref_rejected = sequence_logprobs(rl_model, ids, mask)
+policy_chosen, policy_rejected = sequence_logprobs(policy, ids, mask)
+loss = dpo_loss(policy_chosen, policy_rejected, ref_chosen, ref_rejected)
+print(f"log p(chosen) {ref_chosen.item():.2f}, log p(rejected) {ref_rejected.item():.2f}, loss {loss.item():.4f}")
+```
+
+> **Predict:** Before any training, the policy and the reference are the same model. What will the DPO loss be?
+
+LOSSNARRATION
+
+```python
+optimizer = torch.optim.AdamW(policy.parameters(), lr=1e-5)
+loss.backward()
+optimizer.step()
+with torch.no_grad():
+    policy_chosen, policy_rejected = sequence_logprobs(policy, ids, mask)
+print(f"ratio(chosen) {(policy_chosen - ref_chosen).item():+.3f}, ratio(rejected) {(policy_rejected - ref_rejected).item():+.3f}")
+print(f"loss {dpo_loss(policy_chosen, policy_rejected, ref_chosen, ref_rejected).item():.4f}")
+del policy, optimizer
+```
+
+STEPNARRATION
+
+And there's one more thing we must not forget. If we only show the model ordinary questions, nothing stops it from learning "never spell anything out", and then we'd lose everything RL just taught it. So the preference data also has spelling questions, where the chosen answer is a correct one, and the rejected answer is a wrong one. That's RL's checkable reward, turned into preferences. [[open chat_dpo.py "def collect_pairs(engine):"]] And that's chat_dpo.py. [[circle "good = [a for a in answers if not LEAK.search(a[\"text\"])]"]] The judge for ordinary questions, [[circle "good = [a for a in answers if bee.evaluate(conversation, a[\"text\"])]"]] the judge for spelling questions, [[circle "pairs.append({\"kind\": kind, \"chosen\": rng.choice(good), \"rejected\": rng.choice(bad)})"]] and a pair whenever there's at least one good and one bad answer among the eight. [[open chat_dpo.py "# the reference model never changes"]] Then, because the reference model never changes, we compute its log probabilities for all the pairs once, up front, [[open chat_dpo.py "loss.backward()"]] and the training loop is the same loop as always, with our loss. On my CPU, collecting the pairs took about RUNHOURS, and the training about RUNTRAIN.
+
+```bash
+python chat_dpo.py --general-prompts=600 --spelling-prompts=250
+```
+
+```output
+DPOOUTPUT
+```
+
+RUNNARRATION
+
+Let's see it for ourselves, on the same question as before, and on strawberry.
+
+```python
+dpo_model = load_model("dpo", device).eval()
+dpo_engine = Engine(dpo_model, tokenizer)
+print(f"leak | rl: {leak_rate(rl_engine):.3f}, dpo: {leak_rate(dpo_engine):.3f}")
+sequences, _ = dpo_engine.generate_batch(prompt, num_samples=8, max_tokens=40, temperature=1.0, top_k=50, seed=2)
+for seq in sequences:
+    print(repr(tokenizer.decode(seq[len(prompt):])[:80]))
+print(answers("How many r are in the word 'strawberry'?", dpo_engine))
+```
+
+TALKNARRATION
+
+> **Exercise:** Run chat_dpo.py with only the ordinary questions, no spelling pairs, and measure SpellingBee afterwards. Then try a beta of 0.5 and of 0.01, and see what happens to the leak and to the answers. And exercises fifteen and seventeen in the notebook are the two functions of this chapter: the log probability of an answer, and the DPO loss.
 
 ## Putting it all together
 

@@ -938,22 +938,28 @@ def banner_countdown(st):
 
 def draw_banner(img, st):
     """ "pause and predict": the question in a box at the bottom of the screen, and a countdown """
-    import textwrap
     d = ImageDraw.Draw(img)
-    lines = textwrap.wrap(hand(st.banner["text"]), 62)
+    f = font(40, "hand")
+    x0, x1 = 40, CW - 40
+    words, lines = hand(st.banner["text"]).split(), [""]
+    for w in words: # wrap by width, leaving room for the countdown
+        trial = (lines[-1] + " " + w).strip()
+        if f.getlength(trial) > x1 - x0 - 190 and lines[-1]:
+            lines.append(w)
+        else:
+            lines[-1] = trial
     h = 90 + 50 * len(lines)
-    x0, y0, x1, y1 = 40, H - h - 40, CW - 40, H - 40
-    region = img.crop((x0, y0, x1, y1))
-    img.paste(Image.blend(region, Image.new("RGB", region.size, "#fff6db"), 0.92), (x0, y0))
-    d.rounded_rectangle([x0, y0, x1, y1], radius=18, outline="#e0a800", width=4)
+    y0, y1 = H - h - 40, H - 40
+    d.rounded_rectangle([x0 + 6, y0 + 8, x1 + 6, y1 + 8], radius=18, fill="#d9d2bf") # a soft shadow
+    d.rounded_rectangle([x0, y0, x1, y1], radius=18, fill="#fff6db", outline="#e0a800", width=4)
     d.text((x0 + 30, y0 + 22), "Pause and predict", font=font(34, "sans", True), fill="#b07d00")
     for j, line in enumerate(lines):
-        d.text((x0 + 30, y0 + 72 + 50 * j), line, font=font(40, "hand"), fill="#1f1f1f")
+        d.text((x0 + 30, y0 + 72 + 50 * j), line, font=f, fill="#1f1f1f")
     left = banner_countdown(st)
     if left is not None:
-        cx, cy, r = x1 - 70, y0 + 50, 34
+        cx, cy, r = x1 - 80, (y0 + y1) // 2, 46
         d.ellipse([cx - r, cy - r, cx + r, cy + r], fill="#e0a800")
-        d.text((cx, cy), str(left), font=font(40, "sans", True), fill="white", anchor="mm")
+        d.text((cx, cy), str(left), font=font(52, "sans", True), fill="white", anchor="mm")
 
 CURSOR = None
 def cursor_sprite():

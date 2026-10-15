@@ -235,11 +235,12 @@ PRONUNCIATIONS = [
     ("micrograd", "micro grad"), ("SmolTalk", "Smol Talk"), ("A100", "A 100"), ("H100s", "H 100s"), ("H100", "H 100"),
     ("bfloat16", "B float 16"), ("chat_eval", "chat eval"), ("chat_sft", "chat S F T"), ("chat_rl", "chat R L"),
     ("chat_cli", "chat C L I"), ("render_conversation", "render conversation"), ("loss_reduction", "loss reduction"),
-    ("gpt.py", "the G P T dot pie file"), ("tasks.py", "tasks dot pie"), ("engine.py", "engine dot pie"),
+    ("gpt.py", "G P T dot pie"), ("tasks.py", "tasks dot pie"), ("engine.py", "engine dot pie"),
     ("tokenizer.py", "tokenizer dot pie"), ("pass@k", "pass at k"), ("pass@1", "pass at 1"), ("nan", "NaN"),
     ("pretraining", "pre-training"), ("pretrained", "pre-trained"), ("pretrain", "pre-train"), ("README", "read me"),
     ("prefill", "pre-fill"), ("BOS", "B O S"), ("pyarrow", "pie arrow"), ("KL", "K L"), ("REINFORCE", "reinforce"),
-    ("argmax", "arg max"), ("Pretraining", "Pre-training"), ("ids", "I Ds"),
+    ("argmax", "arg max"), ("Pretraining", "Pre-training"), ("ids", "I Ds"), ("InstructGPT", "Instruct G P T"),
+    ("chat_dpo", "chat D P O"), ("ChatGPT", "Chat G P T"),
 ]
 
 CUE_RE = re.compile(r"\[\[(.*?)\]\] ")
@@ -274,6 +275,7 @@ def spoken(text):
     text = re.sub(r"[`*]", "", text) # markdown emphasis and code
     for written, said in PRONUNCIATIONS:
         text = re.sub(rf"(?<![\w-]){re.escape(written)}(?![\w-])", said, text)
+    text = re.sub(r"(?<=\w)\.py\b", " dot pie", text) # chat_rl.py -> chat R L dot pie
     return text.replace("_", " ")
 
 def narration_segments(blocks):
