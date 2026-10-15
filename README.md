@@ -73,7 +73,7 @@ The defaults assume a 40GB+ GPU. On a 16GB GPU (e.g. a T4), use `python chat_sft
 
 ## Make the narrated video
 
-`lecture/build.py` turns `lecture/lecture.md` into a video. Each narration paragraph becomes one audio clip, and the screen shows the code and the real output being discussed. It also writes an `.srt` subtitle file. Clips are cached per paragraph, so edits only re-synthesize what changed.
+`lecture/build.py` turns `lecture/lecture.md` into a video. Each narration paragraph becomes one audio clip, and the screen shows the code and the real output being discussed. A lecture outline sits in a sidebar, and an animated teacher talks from a "webcam" corner. The teacher is an original cartoon presenter, labelled as an AI narrator, not a likeness of Karpathy or anyone else ([lecture/avatar.py](lecture/avatar.py)). Its lip sync is driven by the audio itself, so it works with every voice backend. Pass `--no-teacher` to leave it out. It also writes an `.srt` subtitle file. Clips are cached per paragraph, so edits only re-synthesize what changed.
 
 The default voice is [Kokoro-82M](https://huggingface.co/hexgrad/Kokoro-82M) (Apache-2.0). It runs locally, on a plain CPU, with no account or API key, at about 2x real time on 4 cores:
 
