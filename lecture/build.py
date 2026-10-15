@@ -175,7 +175,8 @@ PRONUNCIATIONS = [
     ("gpt.py", "the G P T dot pie file"), ("tasks.py", "tasks dot pie"), ("engine.py", "engine dot pie"),
     ("tokenizer.py", "tokenizer dot pie"), ("pass@k", "pass at k"), ("pass@1", "pass at 1"), ("nan", "NaN"),
     ("pretraining", "pre-training"), ("pretrained", "pre-trained"), ("pretrain", "pre-train"), ("README", "read me"),
-    ("prefill", "pre-fill"),
+    ("prefill", "pre-fill"), ("BOS", "B O S"), ("pyarrow", "pie arrow"), ("KL", "K L"), ("REINFORCE", "reinforce"),
+    ("argmax", "arg max"),
 ]
 
 CUE_RE = re.compile(r"\[\[(.*?)\]\] ")

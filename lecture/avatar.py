@@ -140,6 +140,8 @@ def mouth_shapes(audio, fps, sr=16000):
     centroid = (spectrum * freqs).sum(axis=1) / (spectrum.sum(axis=1) + 1e-10)
     smooth = lambda x: np.convolve(x, np.ones(3) / 3, mode="same") # real mouths don't jitter every 40ms
     rms, centroid = smooth(rms), smooth(centroid)
+    if np.percentile(rms, 95) < 1e-4: # silence
+        return ["closed"] * n, np.zeros(n)
     loud = rms / (np.percentile(rms, 95) + 1e-10) # normalize per clip
     shapes = []
     for level, c in zip(loud, centroid):

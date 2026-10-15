@@ -54,6 +54,13 @@ strip_cues = B.strip_cues
 # -----------------------------------------------------------------------------
 # fonts and text layout
 
+HAND_GLYPHS = {"→": "->", "←": "<-", "≈": "~", "≠": "!=", "²": "^2"} # missing from the handwriting font
+
+def hand(text):
+    for a, b in HAND_GLYPHS.items():
+        text = text.replace(a, b)
+    return text
+
 _fonts = {}
 def font(size, kind="mono", bold=False):
     key = (size, kind, bold)
@@ -719,11 +726,11 @@ def annotation_path(ann):
     return [(ann["box"][0], ann["box"][1])]
 
 def note_anchor(ann):
+    """ where the note goes: above the target (or below, near the top of the screen), shifted right a bit """
     x0, y0, x1, y1 = ann["box"]
     width = 17 * len(ann["text"])
-    if x1 + 70 + width < CW - 20:
-        return x1 + 70, y0 - 6
-    return max(40, min(x0, CW - width - 40)), y1 + 26
+    x = max(40, min(x0 + 60, CW - width - 50))
+    return (x, y0 - 62) if y0 - 62 > 20 else (x, y1 + 18)
 
 # -----------------------------------------------------------------------------
 # whiteboard elements
@@ -758,10 +765,10 @@ def draw_board_element(draw, el, u):
     seed = hash(json.dumps(el.get("args"))) % 1000
     if k == "write":
         y = 120 + 70 * el["slot"]
-        text = a[0][:max(1, int(len(a[0]) * u))]
+        text = hand(a[0])[:max(1, int(len(hand(a[0])) * u))]
         draw.text((60, y), text, font=font(46, "hand"), fill=INK["black"], anchor="lm")
     elif k == "text":
-        x, y, full = float(a[0]), float(a[1]), a[2]
+        x, y, full = float(a[0]), float(a[1]), hand(a[2])
         size = int(float(a[3])) if len(a) > 3 and a[3] not in INK else 40
         draw.text((x, y), full[:max(1, int(len(full) * u))], font=font(size, "hand"), fill=color)
     elif k in ("box", "fill"):
@@ -778,7 +785,7 @@ def draw_board_element(draw, el, u):
         draw_polyline(draw, perimeter, u, color, width=4)
         if texts and u > 0.6:
             size = int(nums[4]) if len(nums) > 4 else 34
-            draw.text((x + w / 2, y + h / 2), texts[0], font=font(size, "hand"), fill=INK["black"], anchor="mm")
+            draw.text((x + w / 2, y + h / 2), hand(texts[0]), font=font(size, "hand"), fill=INK["black"], anchor="mm")
     elif k in ("arrow", "line"):
         x1, y1, x2, y2 = nums[:4]
         pts = [(x1 + (x2 - x1) * i / 20, y1 + (y2 - y1) * i / 20) for i in range(21)]
@@ -886,13 +893,18 @@ def draw_annotations(img, st, scroll):
                 img.paste(Image.blend(region, Image.new("RGB", region.size, "#ffe45c"), 0.45), box[:2])
         elif ann["kind"] == "note":
             nx, ny = note_anchor(ann)
-            text = ann["text"][:max(1, int(len(ann["text"]) * min(1.0, u * 1.3)))]
-            d.text((nx, ny + dy), text, font=font(36, "hand"), fill=ANN)
+            full = hand(ann["text"])
+            text = full[:max(1, int(len(full) * min(1.0, u * 1.3)))]
+            f = font(36, "hand")
+            d.rounded_rectangle([nx - 10, ny + dy - 2, nx + f.getlength(full) + 10, ny + dy + 44], radius=10,
+                                fill="#fffdf5", outline="#f2c4cf", width=2)
+            d.text((nx, ny + dy), text, font=f, fill=ANN)
             if u > 0.75:
                 x0, y0, x1, y1 = ann["box"]
-                start = (nx - 10, ny + dy + 20) if nx > x1 else (nx + 20, ny + dy - 4)
-                end = (x1 + 6, (y0 + y1) / 2 + dy) if nx > x1 else ((x0 + x1) / 2, y1 + dy + 2)
-                pts = arrow_points(start, end, ann["seed"])
+                above = ny < y0
+                start = (nx + 20, ny + dy + (44 if above else -2))
+                end = (min(max(nx + 20, x0 + 10), x1 - 4), (y0 if above else y1) + dy + (-2 if above else 2))
+                pts = arrow_points(start, end, ann["seed"], n=12)
                 draw_polyline(d, pts, 1.0, ANN, width=3)
                 draw_arrowhead(d, pts, ANN, width=3)
         else:
