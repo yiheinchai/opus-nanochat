@@ -20,6 +20,9 @@ on:
       indices:
         description: "manifest indices (comma separated) or 'all'"
         default: "0,93"
+      parts:
+        description: "gemini: script parts to read in one request each (comma separated names, or 'all'), instead of clips"
+        default: ""
 
 permissions:
   contents: read
@@ -50,11 +53,13 @@ jobs:
           MODEL: ${{ inputs.model }}
           VOICES: ${{ inputs.voices }}
           INDICES: ${{ inputs.indices }}
+          PARTS: ${{ inputs.parts }}
         run: |
           script=lecture/tts/${{ inputs.backend == 'elevenlabs' && 'elevenlabs_job.py' || 'gemini_job.py' }}
           args=(generate --indices "$INDICES" --out narration)
           if [ -n "$MODEL" ]; then args+=(--model "$MODEL"); fi
           if [ -n "$VOICES" ]; then args+=(--voice "$VOICES"); fi
+          if [ -n "$PARTS" ]; then args+=(--parts "$PARTS"); fi
           python "$script" "${args[@]}"
       - name: Upload the clips (also after a partial failure, so nothing is lost)
         if: always() && inputs.mode == 'generate'
