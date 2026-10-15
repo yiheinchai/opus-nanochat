@@ -2,31 +2,35 @@
 
 <!--
 This file is the single source of truth for the lecture. lecture/build.py turns it into
-1) posttraining.ipynb (the follow-along notebook), 2) narration audio via ElevenLabs, 3) the video.
+1) posttraining.ipynb (the follow-along notebook), 2) the narration audio, 3) the screencast video.
 
 Markup:
 - plain paragraphs are narration (spoken, and markdown cells in the notebook)
+- [[cue ...]] inside the narration directs the screencast (see lecture/screencast.py), it is not spoken
 - ```python                         executed code cell
-- ```python from=FILE start="..."   code cell whose content is pulled from a repo file (single source of truth)
+- ```python from=FILE start="..."   code pulled from a repo file (shown in the editor)
   (add exec=0 to only show it, end="..." to stop before a line containing that text)
 - ```bash                           a shell command (a ! cell in the notebook, not executed at build time; exec=0 = markdown only)
 - ```output                         the output of the preceding bash cell, copied from a real run
+- ```whiteboard                     whiteboard elements, drawn by [[draw name]] cues
 - > **Exercise:** ...               a "pause the video and try it yourself" moment
 -->
 
 ## Intro
 
-Hi everyone. So today we are going to continue where Andrej Karpathy's Zero to Hero series left off. If you've been following along, [[write 'micrograd → makemore → GPT → GPT-2 (124M)']] you've built micrograd, you've built makemore, you've built a GPT from scratch on tiny Shakespeare, and in the last video you reproduced GPT-2, the 124 million parameter version, and you watched the loss come down. And at the end of all that, [[write '= a base model: it continues text']] you had a base model. A thing that can continue text. And it's really cool, but if you actually try to talk to it, you'll find that it's not ChatGPT. It's not an assistant. [[write '... but it is not an assistant']] It just sort of babbles.
+Hi everyone. So today we are going to continue where Andrej Karpathy's Zero to Hero series left off. If you've been following along, [[write "micrograd → makemore → GPT → GPT-2 (124M)"]] you've built micrograd, you've built makemore, you've built a GPT from scratch on tiny Shakespeare, and in the last video you reproduced GPT-2, the 124 million parameter version. And at the end of all that, [[write "= a base model: it continues text"]] you had a base model. A thing that can continue text. But if you actually try to talk to it, you'll find that it's not ChatGPT. [[write "... but it is not an assistant"]] It's not an assistant. It just sort of babbles.
 
-So the question for today is: [[write 'today: what happens after pretraining?']] what happens after pretraining? How do you go from a base model, an internet document simulator, to something that you can actually talk to, that answers your questions, that uses tools, that solves math problems and that can even count the number of r's in strawberry? [[write '→ post-training']] This stage is called post-training, and today we are going to build all of it, from scratch, in the style of Karpathy's nanochat repository.
+So the question for today is: [[write "today: what happens after pretraining?"]] what happens after pretraining? How do you go from a base model, an internet document simulator, to something that you can actually talk to, that answers your questions, that uses tools, and that can even count the number of r's in strawberry? [[write "→ post-training"]] This stage is called post-training, and today we are going to build all of it, from scratch, following Karpathy's nanochat repository.
 
-Now nanochat is the full-stack ChatGPT clone that does everything, tokenizer training, pretraining, supervised finetuning, reinforcement learning, evaluation and inference, in a single minimal codebase. [[write 'pretraining: 8 x H100 for hours']] Pretraining is the expensive part. It needs a node of eight H100 GPUs for a couple of hours. [[write 'post-training: cheap → we do it on GPT-2']] But post-training is much cheaper, and so what we're going to do is we're going to take the GPT-2 base model that you already know and love, and we're going to put it through exactly the post-training pipeline of nanochat. Every file we write today has a counterpart in nanochat, with the same name and the same structure, and at the end I'll show you how to run the real thing at scale.
+Now here is my goal for this video, and I want to be very explicit about it. When you're done, you should be able to reproduce every piece of nanochat's post-training yourself, without looking. Not just know the words, but have typed every line, and understand why every line is there. So we're going to do this the same way as in the rest of the series. We'll start from a problem, try the most obvious thing, see it fail, and then fix it. Every piece of code gets written in the notebook first and tested on tiny examples, and only at the end of each chapter will we look at the file in the repository, which will be the exact same code, cleaned up.
 
-[[erase]] So here is the roadmap. [[write '1. what a base model does']] First, we'll look at what a base model actually does, and we'll see why it's not an assistant. [[write '2. conversations → tokens']] Then we'll figure out how to represent a conversation as a sequence of tokens, with some new special tokens. [[write '3. data mixture, dataloader, SFT']] Then we'll assemble a mixture of training data, write a dataloader for it, and run supervised finetuning, or SFT. [[write '4. engine: KV cache + a python tool']] Then we'll write an inference engine with a KV cache and a little python tool. [[write '5. evaluation']] Then we'll write some evaluations so we can see what we're doing. [[write '6. reinforcement learning']] And finally, we'll do reinforcement learning, where the model practices on problems and learns from its own successes and failures. Okay, so let's get started.
+Here's what you need. You need the base model from the GPT-2 video, and I've put that model, [[open gpt.py "class GPT(nn.Module):"]] with two small additions that we'll write together today, in this gpt.py file. It's the same code, [[point "wte = nn.Embedding"]] the token embeddings, [[point "wpe = nn.Embedding"]] the position embeddings, [[point "h = nn.ModuleList"]] the twelve transformer blocks, [[point "self.lm_head = nn.Linear"]] the language model head, [[underline "self.transformer.wte.weight = self.lm_head.weight"]] with the same weight sharing. And we'll load the original OpenAI weights into it, exactly like we did in that video. Pretraining is the expensive part of the pipeline, it needs a node of eight H100 GPUs for a couple of hours. But post-training is cheap, and everything today runs on a laptop CPU, or on a free Colab GPU if you want it faster.
+
+So here is the roadmap. [[erase]] [[write "1. what a base model actually does"]] First, we'll look at what a base model actually does. [[write "2. conversations → tokens (special tokens, the mask)"]] Then we'll figure out how to turn a conversation into tokens. [[write "3. data: chat, multiple choice, math with a tool, spelling"]] Then we'll build a mixture of training data, [[write "4. a dataloader, and SFT"]] a dataloader for it, and we'll run supervised finetuning. [[write "5. an inference engine: KV cache + tools"]] Then we'll write an inference engine with a KV cache and a python tool, [[write "6. evaluation"]] evaluations to measure what we did, [[write "7. reinforcement learning"]] and finally reinforcement learning, where the model practices and learns from its own successes and failures. Okay, so let's get started.
 
 ## The base model is a document simulator
 
-Okay so first, let's load up GPT-2. [[open gpt.py 'class GPT(nn.Module):']] I've written a gpt.py file here, and this is basically exactly the GPT-2 module from the GPT-2 reproduction video. There's the [[point 'wte = nn.Embedding']] token embeddings, [[point 'wpe = nn.Embedding']] the position embeddings, [[point 'h = nn.ModuleList']] the twelve transformer blocks, [[point 'ln_f = nn.LayerNorm']] the final layer norm and [[point 'self.lm_head = nn.Linear']] the language model head, [[underline 'self.transformer.wte.weight = self.lm_head.weight']] which shares its weights with the token embedding. I've only added two things to it, [[open gpt.py 'class KVCache:']] a KV cache, and [[open gpt.py 'vocab_size: int = 50304']] a few extra rows in the embedding table, and we'll come back to both of those in a bit. [[notebook]] For now let's just load the OpenAI weights and sample from it.
+Okay so first, let's load up GPT-2 and sample from it. The Engine here is something we'll write ourselves later in the lecture, for now just think of it as a function that samples tokens from the model. And I'm writing a little complete function that takes a prompt, puts the beginning of sequence token in front of it, and samples greedily, so always the most likely next token.
 
 ```python
 import torch
@@ -46,17 +50,15 @@ def complete(prompt, max_tokens=60):
 print(complete("Hello, I'm a language model,", max_tokens=20))
 ```
 
-So here I'm doing greedy decoding, [[point temperature=0.0]] so always taking the most likely next token, and you'll recognize this one. [[circle 'and I'"'"'m a programmer.']] "Hello, I'm a language model, and I'm a programmer." That's the same output as in the GPT-2 reproduction video, [[note 'and I'"'"'m a programmer.' 'same as the GPT-2 video']] so we know that we've loaded the weights correctly.
-
-Now let's ask it a question.
+[[circle "and I'm a programmer."]] "Hello, I'm a language model, and I'm a programmer." You'll recognize this from the GPT-2 video, [[note "and I'm a programmer." "same as the GPT-2 video"]] it's exactly the same output, so we know the weights are loaded correctly. Now let's ask it a question.
 
 ```python
 print(complete("What is the capital of France?"))
 ```
 
-Okay, so actually this is not too bad. [[circle 'The capital of France is Paris.']] It does know that the capital of France is Paris. [[highlight 'Paris. The capital of France is Paris. The capital of France is Paris.']] But then it says it again, and again, and again, forever. And that's because this is not an assistant answering a question. [[note 'The capital of France is Paris.' 'a document simulator']] This is a document simulator. It's seen a question on the internet, and it's asking itself, statistically, what tokens come next in a web page that starts like this. It has no notion of a question being answered, and no notion of being done.
+Okay, so actually this is not too bad. [[circle "The capital of France is Paris."]] It does know that the capital of France is Paris. [[highlight "Paris. The capital of France is Paris. The capital of France is Paris."]] But then it says it again, and again, and again, forever. And I want you to really think about why. This model was trained on web pages. So when it sees a question, it's asking itself, statistically, what text comes next in a web page that starts like this. [[note "The capital of France is Paris." "a document simulator"]] It's not answering you. It's simulating a document. And documents on the internet don't end after one sentence, so it has no notion of being done.
 
-So here's a fun trick. Because the base model is a document simulator, we can actually trick it into being an assistant, by giving it the beginning of a document that looks like a conversation with an assistant. This is sometimes called few-shot prompting. Let's try it.
+Now because it's a document simulator, there's actually a fun trick. We can give it the beginning of a document that looks like a conversation with an assistant, and let it continue that document. This is called few-shot prompting.
 
 ```python
 prompt = """The following is a conversation between a helpful AI Assistant and a Human.
@@ -72,9 +74,9 @@ Assistant:"""
 print(complete(prompt, max_tokens=40))
 ```
 
-So look at this, this is really interesting. First of all, it picked up on the format. [[point 'Assistant: The United States.']] It answers in the voice of the Assistant. [[circle ' France.']] But the answer is "France", which is wrong, it's a very small model. And then, it just keeps going. [[underline 'Human: What is the capital of the United States?']] It writes the next question from the Human, [[underline 'Assistant: The United States.']] and then the answer of the Assistant, and so on. It's simulating the whole document, [[note 'Human: What is the capital of the United Kingdom?' 'it plays both sides!']] both sides of the conversation, because that's all it knows how to do.
+So look at this. [[point "Assistant: The United States."]] It did pick up on the format, it answers in the voice of the Assistant. [[circle " France."]] The answer is "France", which is wrong, it's a small model. But the much bigger problem is what happens next. [[underline "Human: What is the capital of the United States?"]] It writes the next question from the Human, [[underline "Assistant: The United States."]] and then the answer of the Assistant, and so on. [[note "Human: What is the capital of the United Kingdom?" "it plays both sides!"]] It's simulating the whole document, both sides of the conversation, because that's all it knows how to do.
 
-So this tells us a few things. [[write '1. the knowledge is already in there']] Number one, the knowledge is in there, the capabilities are mostly there from pretraining. [[write '2. it plays an assistant if the document looks like a chat']] Number two, the base model is perfectly happy to adopt the persona of an assistant if it thinks that's the kind of document it's in. [[write '3. it doesn'"'"'t know when its turn ends']] And number three, it has no idea where its turn ends. [[write '→ train on documents that ARE conversations']] So the idea of post-training is basically: instead of tricking the model with a prompt, let's just continue training it on a lot of documents that look exactly like conversations, in some very specific format, with clearly marked turns. Then the model's statistics shift, and conversations become the only kind of document it knows.
+So this tells us three things. [[write "1. the knowledge is already in there"]] Number one, the knowledge is already in there, from pretraining. [[write "2. it plays an assistant if the document looks like a chat"]] Number two, the model is perfectly happy to play an assistant, if the document looks like a chat. [[write "3. it doesn't know when its turn ends"]] And number three, it has no idea where its turn ends. And that suggests the whole idea of post-training. [[write "→ keep training on documents that ARE conversations"]] Instead of tricking the model with a prompt, we just keep training it, on a lot of documents that are conversations, in some very specific format with clearly marked turns. Then conversations become the kind of document it knows.
 
 > **Exercise:** Before we move on, think about how you would do this. If a conversation has to become a single sequence of tokens, what would that sequence look like? And which of those tokens should the model actually be trained on?
 
@@ -93,166 +95,326 @@ So this tells us a few things. [[write '1. the knowledge is already in there']] 
 @legend text 40 540 "green = trained on      red = only context" 36
 ```
 
-Okay so let's look at what a conversation looks like as data. In nanochat, and also in most of the datasets on HuggingFace, a conversation is just a dict with a list of messages, and each message has a role, user or assistant, and some content.
+Okay so what is a conversation, as data? In nanochat, and in most datasets on HuggingFace, it's just a dict with a list of messages, and every message has a role, user or assistant, and the content. Our job is to turn that into one sequence of integers, so that we can train on it exactly like we trained on web pages.
+
+So, the obvious first idea. Why not just write it as text? "User: blah, Assistant: blah". That's what our few-shot prompt did. And there are two problems with it. First, the model can't tell a real turn boundary from the text "Assistant:" appearing inside a message. And second, anyone could type "Assistant:" in their message and pretend to be the assistant. So instead, [[draw title]] we're going to mark the turns with brand new special tokens, tokens that only we can insert. [[draw user]] A user start and a user end around everything the user says, [[draw asst]] and an assistant start and an assistant end around everything the assistant says. Let's see why they need to be special. Here's what the GPT-2 tokenizer does with the text of our token.
 
 ```python
+import tiktoken
+gpt2 = tiktoken.get_encoding("gpt2")
+ids = gpt2.encode_ordinary("<|user_start|>")
+print(ids)
+print([gpt2.decode([i]) for i in ids])
+```
+
+[[underline "['<', '|', 'user', '_', 'start', '|', '>']"]] Seven ordinary tokens. A less than sign, a pipe, the word user, and so on. That's no good. We want each of our markers to be exactly one token, one integer that can never come out of normal text. And tiktoken lets us do that, we just register them as special tokens.
+
+```python
+SPECIAL_TOKENS = ["<|user_start|>", "<|user_end|>", "<|assistant_start|>", "<|assistant_end|>",
+                  "<|python_start|>", "<|python_end|>", "<|output_start|>", "<|output_end|>"]
+special = {"<|endoftext|>": 50256}
+special.update({name: 50257 + i for i, name in enumerate(SPECIAL_TOKENS)})
+enc = tiktoken.Encoding(name="gpt2_chat", pat_str=gpt2._pat_str,
+                        mergeable_ranks=gpt2._mergeable_ranks, special_tokens=special)
+print(special)
+print(enc.encode_single_token("<|assistant_end|>"))
+print(enc.encode_ordinary("<|assistant_end|>"))
+```
+
+So GPT-2 already has one special token, [[circle "'<|endoftext|>': 50256"]] end of text, with id 50,256, and we'll use it as our beginning of sequence token, BOS. And we give our eight new tokens [[underline "'<|user_start|>': 50257"]] the next eight ids, 50,257 through 50,264. You'll also notice there are two more pairs, python start and end, and output start and end. Those are for tool use, and we'll get to them in a bit. Now if we ask for the special token, we get a single id. [[note "[27, 91, 562, 10167, 62, 437, 91, 29]" "typed by a user: just text"]] But encode_ordinary, which is what we'll use for everything a user types, still treats it as plain text. So a user can't inject a turn boundary. That's exactly what we want.
+
+Okay, now let's write the function that renders a conversation into tokens. Simplest version first: BOS, and then for every message, the start token, the tokens of the content, and the end token.
+
+```python
+def render_conversation(conversation):
+    s = enc.encode_single_token
+    ids = [50256] # every conversation starts with the BOS token
+    for message in conversation["messages"]:
+        if message["role"] == "user":
+            ids += [s("<|user_start|>"), *enc.encode_ordinary(message["content"]), s("<|user_end|>")]
+        else:
+            ids += [s("<|assistant_start|>"), *enc.encode_ordinary(message["content"]), s("<|assistant_end|>")]
+    return ids
+
 conversation = {"messages": [
     {"role": "user", "content": "What is the capital of France?"},
     {"role": "assistant", "content": "Paris"},
 ]}
+ids = render_conversation(conversation)
+print(ids)
+print([enc.decode([i]) for i in ids])
 ```
 
-[[point '"messages"']] And the question is how do we flatten this into one sequence of tokens. [[draw title]] What we're going to do is we're going to introduce new special tokens that delimit the turns. [[draw user]] There's a user start and a user end, [[draw asst]] an assistant start and an assistant end, and then there are two more pairs that we'll need later for tool use, python start and end for when the assistant wants to run some python code, and output start and end, for the output of that code. [[open tokenizer.py 'SPECIAL_TOKENS = [']] These are exactly the special tokens of nanochat.
+[[underline "[50256, 50257, 2061, 318, 262, 3139, 286, 4881, 30, 50258, 50259, 40313, 50260]"]] So the whole conversation is thirteen tokens. [[circle "'Paris'"]] And the decoded pieces look right: BOS, user start, the question, user end, assistant start, Paris, assistant end.
 
-```python from=tokenizer.py start="SPECIAL_TOKENS = [" end="class Tokenizer"
-```
-
-[[circle '"<|assistant_end|>",']] The most important one by far is assistant end, because that is how the model is going to tell us that it's done talking. [[point '"<|python_start|>",']] Remember the base model that just went on and on? This token is the fix. When we sample from the model and it emits assistant end, we stop, and it's the user's turn.
-
-Now here's the function that renders a conversation into tokens. [[open tokenizer.py 'def render_conversation']] It's called render_conversation, and it's very simple, but there's one very important subtlety. Besides the token ids, [[underline 'mask = 1 for the tokens that the assistant should be trained to produce.']] it also returns a mask, and the mask is one for every token that the assistant should be trained to produce, and zero for everything else.
-
-```python from=tokenizer.py start="    def render_conversation" end="    def render_for_completion" exec=0
-```
-
-[[circle 'add_tokens(self.bos, 0)']] So we start with the beginning of sequence token. Then we go through the messages. [[highlight 'add_tokens(s("<|user_start|>"), 0)']] For a user message, we add user start, the tokens of the content, and user end, [[circle 'add_tokens(self.encode(content), 0)']] and all of these get a mask of zero. [[point 'add_tokens(s("<|assistant_start|>"), 0)']] For an assistant message, we add assistant start with a mask of zero, [[circle 'add_tokens(value_ids, 1)']] and then the content with a mask of one, [[note 'add_tokens(s("<|assistant_end|>"), 1)' 'learn when to stop!']] and then assistant end, also with a mask of one, because the assistant has to learn when to stop.
-
-The content of an assistant message can also be a list of parts, and that's for tool use. [[highlight 'elif part["type"] == "python":']] A python part is the assistant writing some code, so it's wrapped in python start and python end, [[circle 'add_tokens(s("<|python_start|>"), 1)']] and we do train on it, because at test time the assistant has to write that code. [[highlight 'elif part["type"] == "python_output":']] But the python output part is wrapped in output start and output end, [[circle 'add_tokens(s("<|output_start|>"), 0)']] and that one is masked out, because at test time this text is going to come from the python interpreter, not from the model. There's no point in training the model to predict the output of python, [[note 'add_tokens(s("<|output_end|>"), 0)' 'never train on tool outputs']] in fact it would be actively bad, it would be training the model to hallucinate tool outputs.
-
-Let's look at it. [[open tokenizer.py 'def visualize']] I have a little helper to visualize the tokens, [[point 'GREEN, RED, RESET']] where green means trained on, and red means not trained on.
+Now here's the important question, the one from the exercise. If we train on this sequence like we train on a web page, the model learns to predict every one of these tokens, including the user's question. Is that what we want? Think about it. We don't want a model that simulates users, we want a model that responds to them. Predicting what people ask is not useless, but it's not our job, and with a small model, every bit of capacity matters. So we only want to train on the tokens that the assistant writes. [[draw mask]] And the way we do that is we return a second list, a mask, with a one for every token the assistant should learn to produce, and a zero for everything else.
 
 ```python
-ids, mask = tokenizer.render_conversation(conversation)
-print(ids)
-print(mask)
-print(tokenizer.visualize(ids, mask))
+def render_conversation(conversation):
+    s = enc.encode_single_token
+    ids, mask = [], []
+    def add_tokens(token_ids, mask_val):
+        ids.extend(token_ids)
+        mask.extend([mask_val] * len(token_ids))
+    add_tokens([50256], 0)
+    for message in conversation["messages"]:
+        if message["role"] == "user":
+            add_tokens([s("<|user_start|>"), *enc.encode_ordinary(message["content"]), s("<|user_end|>")], 0)
+        else:
+            add_tokens([s("<|assistant_start|>")], 0)
+            add_tokens(enc.encode_ordinary(message["content"]), 1)
+            add_tokens([s("<|assistant_end|>")], 1)
+    return ids, mask
+
+ids, mask = render_conversation(conversation)
+for i, m in zip(ids, mask):
+    print(f"{enc.decode([i])!r:24} mask={m}")
 ```
 
-[[underline '[50256, 50257, 2061, 318, 262, 3139, 286, 4881, 30, 50258, 50259, 40313, 50260]']] So the whole conversation is thirteen tokens. [[underline '<|user_start|>|What| is| the| capital| of| France|?|<|user_end|>']] The user part is all red, [[circle 'Paris|<|assistant_end|>']] and the only green tokens are Paris and assistant end. [[circle '1, 1]']] So the model is only going to receive gradient on those two tokens. The user's question is just context.
+[[highlight "'<|user_start|>'"]] So everything the user wrote, and all the special tokens around it, get a zero. [[point "'<|assistant_start|>'"]] The assistant start token also gets a zero, because we always put it there ourselves, the model never has to produce it. [[circle "'Paris'"]] Then the content gets a one, [[circle "'<|assistant_end|>'"]] and then assistant end also gets a one. And this one is really important. [[note "'<|assistant_end|>'" "learn when to stop!"]] This is how the model learns to stop talking. Remember the base model that went on forever? This is the fix. After Paris, the model must learn to emit assistant end, and then we stop sampling, and it's the user's turn.
 
-And why do we mask the user tokens? [[draw mask]] Well, think about what we want. We are not trying to build a model that simulates users, we're trying to build a model that responds to them. If we train on the user tokens, a part of the model's capacity is spent on learning what kinds of questions people ask, which is not useless, but it's not the thing we care about, and with smaller models every bit of capacity matters. [[circle '<|assistant_end|>']] The other thing to note is that the very last token here, the assistant end, means something. [[draw legend]] The model has to learn that after Paris, it is done.
+Now for tool use. Sometimes we want the assistant to run a bit of python, for example a calculator. So the content of an assistant message can also be a list of parts. A text part is just text. A python part is code that the assistant writes, and we wrap it in python start and python end. And a python output part is the result of running that code, wrapped in output start and output end. Now pause and think about the mask. Which of these should get a one?
 
-Now one more function, and this is the one we'll use at test time. [[open tokenizer.py 'def render_for_completion']] When we want the model to respond, [[highlight 'ids, _ = self.render_conversation({"messages": messages[:-1]})']] we render everything except for the last assistant message, [[circle 'ids.append(self.encode_special("<|assistant_start|>"))']] and then we append assistant start. And that's the prompt. The model then takes it from there, and we sample until it emits assistant end.
+```python
+def render_conversation(conversation):
+    s = enc.encode_single_token
+    ids, mask = [], []
+    def add_tokens(token_ids, mask_val):
+        ids.extend(token_ids)
+        mask.extend([mask_val] * len(token_ids))
+    add_tokens([50256], 0)
+    for message in conversation["messages"]:
+        content = message["content"]
+        if message["role"] == "user":
+            add_tokens([s("<|user_start|>"), *enc.encode_ordinary(content), s("<|user_end|>")], 0)
+            continue
+        add_tokens([s("<|assistant_start|>")], 0)
+        if isinstance(content, str):
+            content = [{"type": "text", "text": content}]
+        for part in content:
+            value = enc.encode_ordinary(part["text"])
+            if part["type"] == "text":
+                add_tokens(value, 1)
+            elif part["type"] == "python": # the assistant writes the code: train on it
+                add_tokens([s("<|python_start|>"), *value, s("<|python_end|>")], 1)
+            elif part["type"] == "python_output": # python writes the output: don't train on it
+                add_tokens([s("<|output_start|>"), *value, s("<|output_end|>")], 0)
+        add_tokens([s("<|assistant_end|>")], 1)
+    return ids, mask
 
-```python from=tokenizer.py start="    def render_for_completion" end="    def visualize" exec=0
+def visualize(ids, mask):
+    GREEN, RED, RESET = '\033[92m', '\033[91m', '\033[0m'
+    return '|'.join(f"{GREEN if m else RED}{enc.decode([i])}{RESET}" for i, m in zip(ids, mask))
+
+tool_conversation = {"messages": [
+    {"role": "user", "content": "What is 123 times 45?"},
+    {"role": "assistant", "content": [
+        {"type": "text", "text": "Let me use python: "},
+        {"type": "python", "text": "123*45"},
+        {"type": "python_output", "text": "5535"},
+        {"type": "text", "text": " The answer is 5535."},
+    ]},
+]}
+print(visualize(*render_conversation(tool_conversation)))
 ```
 
-And by the way, this format is a design choice. [[erase]] [[write 'ChatML:  <|im_start|> ... <|im_end|>']] OpenAI's ChatML uses tokens like im start and im end, [[write 'Llama:  [INST] ... [/INST]']] Llama has its own format, and so on, but they all do basically the same thing. [[write '→ render the same way at train time and test time!']] What matters is that you're consistent between training and test time. If you render a conversation one way during training, and a slightly different way at test time, even a single space different, things can go subtly wrong.
+[[circle "<|python_start|>|123|*|45|<|python_end|>"]] The code gets a one, because at test time the model has to write it. [[circle "<|output_start|>|55|35|<|output_end|>"]] But the output gets a zero. [[note "<|output_start|>|55|35|<|output_end|>" "python writes this, not the model"]] At test time, python is going to produce those tokens, not the model. If we trained on them, we would be teaching the model to predict what python would say, in other words to hallucinate tool outputs, and that's actively harmful. [[underline "| The| answer| is| 55|35|.|<|assistant_end|>"]] And then after the output, the model continues in green, and it can copy the result into its answer.
+
+And one last function. At test time, we have a conversation where it's the assistant's turn. So we render everything except the last assistant message, and then we append assistant start. And that's our prompt. The model takes it from there, and we sample until it emits assistant end.
+
+```python
+def render_for_completion(conversation):
+    ids, _ = render_conversation({"messages": conversation["messages"][:-1]})
+    return ids + [enc.encode_single_token("<|assistant_start|>")]
+
+print([enc.decode([i]) for i in render_for_completion(conversation)])
+```
+
+[[circle "'<|assistant_start|>'"]] So the prompt ends with assistant start, and the next token the model writes is the beginning of its answer. Now, I've put exactly this code into the tokenizer file of the repo, and let's just check that our notebook version and the repo version agree.
+
+```python
+print(tokenizer.render_conversation(tool_conversation) == render_conversation(tool_conversation))
+print(tokenizer.render_for_completion(conversation) == render_for_completion(conversation))
+```
+
+[[open tokenizer.py "def render_conversation"]] Good. The repo version, in tokenizer.py, is the same function, [[point "if messages[0][\"role\"] == \"system\":"]] with two small additions: if a conversation starts with a system message, we just glue it onto the first user message, because we don't have special tokens for system messages. [[circle "return ids[:max_tokens], mask[:max_tokens]"]] And there's a max tokens argument that truncates, which, I'll tell you right now, is going to bite us later. And by the way, this exact format is a design choice. [[write "ChatML:  <|im_start|> ... <|im_end|>"]] OpenAI's ChatML uses tokens like im start and im end, [[write "Llama:  [INST] ... [/INST]"]] Llama has its own, and they all do basically the same thing. [[write "→ render the same way at train time and test time!"]] What matters is that you render conversations the same way at training time and at test time. Even a single space different can quietly hurt your model.
+
+> **Exercise:** Add support for system messages to your render_conversation, the way the repo does it. Then write a conversation with two user turns and two assistant turns and visualize it. Which tokens are green?
 
 ## Brain surgery on GPT-2
 
-Okay so now we have a problem. [[write 'GPT-2 vocab: 50,257 tokens']] GPT-2's vocabulary has 50,257 tokens and none of them are our special tokens. [[write '50,256 = <|endoftext|>  → our BOS']] The only special token in GPT-2 is end of text, which has id 50,256, and we're going to use that one as our beginning of sequence token. [[write 'we need 8 more special tokens']] But we need eight more.
+Okay so we have our token ids, but now we have a problem. [[write "GPT-2 vocab: 50,257 tokens"]] GPT-2's vocabulary has 50,257 tokens, so its embedding table has exactly 50,257 rows, [[write "our special tokens: 50,257 ... 50,264"]] and our special tokens have ids 50,257 through 50,264. There's no row for them. If we feed id 50,257 into the original GPT-2, it's an index out of range error.
 
-Now here's where something fun comes in. If you remember the GPT-2 reproduction video, at some point [[write 'vocab_size = 50,304 (a nice number)']] we changed the vocab size from 50,257 to 50,304, because 50,304 is a nice number, it's divisible by 128 and so on, and the GPU kernels run faster. And we said those extra 47 tokens are never used, the model just learns to drive their probabilities to zero. Well, today we actually use them. [[write '50,257 ... 50,264 = our special tokens']] Our special tokens get the ids 50,257 through 50,264, right inside that padding. [[open tokenizer.py 'special = {"<|endoftext|>": 50256}']] So in the tokenizer we just tell tiktoken about these new tokens.
-
-```python from=tokenizer.py start="    def __init__" end="    def encode(self" exec=0
-```
-
-[[open gpt.py 'def from_pretrained(cls):']] And in the model, when we load the OpenAI weights, [[open gpt.py 'sd[ours][:n].copy_(w)']] we copy the 50,257 rows of the embedding table that GPT-2 had, and then we have to decide what to do with all the new rows. [[circle 'sd[ours][n:].copy_(w.mean(dim=0))']] Here I've initialized them to the average embedding of all the tokens. That's a reasonable thing to do. It's a neutral vector that sort of lives in the right part of the space, and it doesn't blow anything up.
-
-```python from=gpt.py start="            if k == 'wte.weight':" end="            assert sd[ours].shape" exec=0
-```
-
-But now, and this is something that Karpathy really drills into you in the makemore videos, [[write 'sanity check: the loss at init']] let's sanity check the loss at initialization, before we train anything. What loss do we expect? Well, if the model had no idea and was spreading its probability uniformly over the whole vocabulary, the loss would be the negative log of one over 50,304, [[write 'uniform guess: -log(1/50304) = 10.8']] so about 10.8. Let's look at the loss of every single token of our little conversation.
+Now if you remember the GPT-2 reproduction video, [[write "vocab_size = 50,304 (a nice number)"]] we padded the vocab size from 50,257 up to 50,304, because it's a nice number, divisible by 128, and the GPU kernels like that. And we said those extra 47 rows are never used. Well, today they get used. So when we load the OpenAI weights, we copy their 50,257 rows, and we have to decide what to put in the new rows. [[open gpt.py "if k == 'wte.weight':"]] Here's the code. [[circle "sd[ours][:n].copy_(w)"]] Copy GPT-2's rows, and then, [[circle "sd[ours][n:].copy_(w.mean(dim=0))"]] for all the new rows, I'm using the average of all the token embeddings. Why the average? Because random vectors could be anywhere, but the average sort of lives in the region where real embeddings live, so it won't blow anything up. Let's check that it did what we wanted.
 
 ```python
+w = model.transformer.wte.weight
+print(w.shape)
+print(model.lm_head.weight is w)
+print((w[50257:] - w[:50257].mean(dim=0)).abs().max().item())
+```
+
+[[circle "torch.Size([50304, 768])"]] So the table has 50,304 rows. [[circle "True"]] The language model head is literally the same tensor as the embedding table, that's the weight sharing from the GPT-2 paper. And that matters a lot here, because it means the new rows are not only the input embeddings of our special tokens, they're also the output weights that produce their logits. [[note "0.0" "every new row = the average"]] And all the new rows are exactly the average.
+
+Now, and this is something that Karpathy drills into you in the makemore videos, before we train anything, let's sanity check the loss at initialization. What do we expect? [[write "uniform guess: -log(1/50304) = 10.8"]] If the model had no idea and spread its probability evenly over the vocabulary, the loss would be minus log of one over 50,304, so about 10.8. Let's look at the loss of every single token of our conversation.
+
+```python
+import math
+print(-math.log(1 / 50304))
+ids, mask = render_conversation(conversation)
 x, y = torch.tensor([ids[:-1]]), torch.tensor([ids[1:]])
 with torch.no_grad():
     losses = model(x, y, loss_reduction='none')
 for token, m, loss in zip(ids[1:], mask[1:], losses):
-    print(f"{tokenizer.decode([token])!r:25} mask={m} loss={loss.item():.2f}")
+    print(f"{enc.decode([token])!r:24} mask={m} loss={loss.item():.2f}")
 ```
 
-Okay so this is very interesting. [[point loss=1.81]] The normal English tokens look fine. The model is very confident about the word "is" after "what", and so on. [[circle loss=14.85]] But look at the special tokens. [[circle loss=15.17]] They all have a loss of around 15, [[note loss=15.26 'worse than uniform (10.8)!']] which is way worse than the 10.8 of a uniform guess. The model is confidently wrong about them. And that's because their embeddings are the average embedding, and because the weights are tied, the logit of a special token is the dot product of the hidden state with that average vector, and in GPT-2 that happens to be a pretty low logit. [[circle 'mask=1 loss=14.85']] So in the very beginning of finetuning, the loss is going to be dominated by the special tokens, and a lot of the early optimization is just going to be spent on learning that these tokens exist. We'll see that in the loss curve. It's sort of the hockey stick from the makemore videos all over again.
+[[circle "10.825839875788878"]] So 10.8 is the uniform guess. [[point "loss=1.81"]] The normal English tokens look fine, the model is quite sure that "is" follows "What", and so on. [[circle "loss=14.85"]] But look at the special tokens. [[circle "loss=15.17"]] All of them are around 15, [[note "loss=15.26" "worse than a uniform guess!"]] which is much worse than a uniform guess. The model is confidently wrong about them. And it's because of the weight sharing. The logit of a special token is the dot product of the hidden state with that average embedding, and that just happens to be a small number compared to the logits of real tokens. So the probability is tiny, and the loss is huge. And what this means is that at the start of finetuning, a lot of the loss is going to come from these tokens, and the first thing the model will do is learn that they exist. It's the hockey stick from makemore, all over again.
 
-By the way, in nanochat the special tokens are part of the tokenizer from the very beginning, so this surgery isn't needed. But they are never seen during pretraining, except for the beginning of sequence token, so they're in a similar situation. Their embeddings exist, but the model has never had to predict them.
-
-> **Exercise:** Can you come up with a better initialization for the new embedding rows, one that gives a loss of about 10.8 or lower at initialization for the special tokens? What happens if you initialize them to the embedding of a related token, for example the embedding of a newline for user end?
+> **Exercise:** Can you find a better initialization for the new rows, one that gives a loss of about 10.8 or lower for the special tokens at initialization? Try initializing assistant end to the embedding of a newline, or scaling the average vector. Measure the loss with the cell above.
 
 ## The data mixture
 
-Okay, now we need data. A lot of conversations. And in nanochat, the SFT data is a mixture of several datasets, and each one of them teaches the model something different. So let's go through them one by one. [[open tasks.py 'class Task:']] In nanochat these live in a tasks directory, and I've put them all in one tasks.py file here. [[point 'A list of conversations.']] A task is basically just a list of conversations, [[point 'def reward(self, conversation, completion):']] plus optionally a way of grading the answer.
+Okay, now we need conversations to train on. A lot of them. And here's the key idea of the SFT stage in nanochat: the data is a mixture of several datasets, and every one of them teaches the model one specific thing. [[write "SFT data = a mixture, each part teaches one thing"]] So let's build them one at a time. And the one I find the most instructive is grade school math, GSM8K, so let's start there.
 
-The first one is SmolTalk, from HuggingFace. [[open tasks.py 'class SmolTalk(HubTask):']] This is 460,000 general conversations, and this is where most of the "personality" of the assistant comes from. Let's look at one.
+All of these datasets live on HuggingFace, and every dataset on HuggingFace has an automatic export to parquet files. [[open tasks.py "def load_hub_dataset"]] So I wrote a tiny function that downloads those parquet files and reads them with pyarrow. You don't need the datasets library for this. Let's load the GSM8K training set and look at one problem.
 
 ```python
-from tasks import SmolTalk, MMLU, GSM8K, SpellingBee
+from tasks import load_hub_dataset
+table = load_hub_dataset("openai/gsm8k", "main", split="train")
+print(table.num_rows, table.column_names)
+row = {col: table[col][3].as_py() for col in table.column_names}
+print(row["question"])
+print(row["answer"])
+```
+
+[[circle "7473"]] 7,473 problems, [[point "['question', 'answer']"]] each with a question and an answer. And look at the answer. [[circle "<<12*2=24>>"]] What are these things in double angle brackets? These are calculator annotations, from the people who made the dataset. "12 times 2 equals 24" is written out as the expression and its result. [[circle "#### 42"]] And at the very end, after four hash signs, is the final answer, which is what we'll use for grading.
+
+So here's the plan. These calculator annotations are a gift. They're exactly the tool calls that we want our model to learn. So we're going to turn every one of them into a python part, followed by a python output part. Step one, let's split the answer into the text and the annotations. A regex split with a capture group keeps the separators, so we get both.
+
+```python
+import re
+chunks = re.split(r'(<<[^>]+>>)', row["answer"])
+print(chunks)
+```
+
+[[circle "'<<12*2=24>>'"]] So we get the plain text, then the annotation, then text again, alternating. Step two, for every annotation, we strip the angle brackets and split at the last equals sign. Left of it is the expression, which becomes a python part, and right of it is the result, which becomes a python output part. Everything else is a text part. And then we can render it with our own render_conversation and look at the mask.
+
+```python
+parts = []
+for chunk in chunks:
+    if chunk.startswith('<<') and chunk.endswith('>>'):
+        expr, _, result = chunk[2:-2].rpartition('=')
+        parts.append({"type": "python", "text": expr})
+        parts.append({"type": "python_output", "text": result})
+    else:
+        parts.append({"type": "text", "text": chunk})
+math_conversation = {"messages": [{"role": "user", "content": row["question"]},
+                                  {"role": "assistant", "content": parts}]}
+print(visualize(*render_conversation(math_conversation)))
+```
+
+[[circle "<|python_start|>|12|*|2|<|python_end|>"]] So the model is trained to write the expression, in green, [[circle "<|output_start|>|24|<|output_end|>"]] the result is red, it will come from python, [[underline "|24| pages| today|"]] and then the model copies the result into its sentence. This is the simplest possible version of tool use. The model learns to hand the arithmetic, which it's bad at, to a calculator, which is perfect at it. [[circle "|####| 42|"]] And at the end, the four hash signs and the answer. Now to grade an answer, we just pull out the number after the hash signs, with a regex, and compare it to the reference.
+
+```python
+ANSWER_RE = re.compile(r"#### (\-?[0-9\.\,]+)")
+def extract_answer(completion):
+    match = ANSWER_RE.search(completion)
+    return match.group(1).strip().replace(",", "") if match else None
+
+print(extract_answer(row["answer"]), extract_answer("so the answer is #### 1,024"), extract_answer("no idea"))
+```
+
+[[circle "42 1024 None"]] So 42 for our problem, commas get removed so 1,024 becomes 1024, and None when there's no answer at all. That's it, that's our grader. And notice that this grader is going to be our reward in reinforcement learning, at the end of the lecture.
+
+The second dataset is MMLU, which is multiple choice questions. And it teaches the model the format of multiple choice, which is how we'll evaluate it later. Let's write the function that renders a multiple choice question, and I'll show you two little details in it.
+
+```python
+def render_mc(question, letters, choices):
+    query = f"Multiple Choice question: {question}\n"
+    query += "".join(f"- {choice}={letter}\n" for letter, choice in zip(letters, choices))
+    query += "\nRespond only with the letter of the correct answer."
+    return query
+
+print(render_mc("What is the capital of France?", "ABCD", ["Berlin", "Madrid", "Paris", "Rome"]))
+print(enc.encode_ordinary(" A"), enc.encode_ordinary("A"), enc.encode_ordinary("=A"))
+```
+
+[[circle "- Paris=C"]] The first detail is that the letter comes after the choice, not before it. Big models don't care, but for small models it helps to have the letter right next to the thing it labels. [[note "- Paris=C" "no space before the letter"]] The second detail is that there's no space between the equals sign and the letter. Why? Look at the tokens. [[circle "[317]"]] "Space A" is token 317, [[circle "[32]"]] and "A" without a space is token 32. These are completely different tokens as far as the model is concerned, just different integers. The assistant answers with just "A", token 32. [[note "[28, 32]" "the same token 32"]] So in the prompt, we want the exact same token 32 to appear right next to the choice, so the model can sort of point at it. If you remember the tokenization video, so much weirdness in LLMs comes from the tokenizer, and this is one of those details.
+
+The third dataset is SmolTalk, from HuggingFace. That's 460,000 general conversations, and it's where most of the personality of the assistant comes from.
+
+```python
+from tasks import SmolTalk
 smoltalk = SmolTalk("train")
-example = smoltalk[0]
-for message in example["messages"]:
-    print(f"--- {message['role']}:\n{message['content'][:500]}")
+for message in smoltalk[0]["messages"]:
+    print(f"--- {message['role']}:\n{message['content'][:400]}")
 ```
 
-[[point '--- assistant:']] So these conversations were mostly generated synthetically, by bigger language models, and then filtered. And I think it's worth pausing on this, because it's a really important point that Karpathy makes in his talks about LLMs. [[write 'who are you talking to?']] When you talk to ChatGPT, who are you talking to? Well, the answer is that [[write '→ a simulation of the SFT data']] you're talking to a statistical simulation of the data in the SFT stage. [[write 'labelers + labeling instructions']] Originally that data was written by human labelers following long labeling instructions from a company, about how to be helpful, truthful and harmless. [[write 'nowadays: mostly other LLMs']] Nowadays a lot of it is written by other LLMs. But either way, the persona, the tone, the length of the answers, the little bullet points, all of that comes from imitating this data. [[write 'knowledge ← pretraining,  personality ← SFT']] The knowledge comes from pretraining, but the personality is downloaded from SFT.
+[[point "--- assistant:"]] These were mostly generated by bigger language models, and then filtered. And it's worth pausing on this, because Karpathy makes a really important point about it in his talks. [[erase]] [[write "who are you talking to?"]] When you talk to ChatGPT, who are you actually talking to? [[write "→ a simulation of the SFT data"]] You're talking to a statistical simulation of this kind of data. [[write "labelers + labeling instructions, or other LLMs"]] Originally it was written by human labelers following long instructions from a company about being helpful and harmless, and nowadays a lot of it is written by other LLMs. [[write "knowledge ← pretraining,  personality ← SFT"]] But either way, the knowledge comes from pretraining, and the personality, the tone, the length of the answers, all comes from imitating this data.
 
-The second one is MMLU, which is multiple choice questions across 57 subjects. And this one teaches the model the format of multiple choice, which is how we're going to evaluate it later. Let's look.
+And the fourth dataset is my favorite. How many r's are there in strawberry? Famously, LLMs get this wrong, and now we can understand why. Look at how it's tokenized.
 
 ```python
-mmlu = MMLU("auxiliary_train")
-example = mmlu[1]
-print(example["messages"][0]["content"])
-print("--- answer:", example["messages"][1]["content"])
+print([enc.decode([t]) for t in enc.encode_ordinary(" strawberry")])
+print([enc.decode([t]) for t in enc.encode_ordinary("strawberry")])
 ```
 
-[[point 'Multiple Choice question:']] So the user gives a question and some choices, [[circle '--- answer: B']] and the assistant responds with a single letter. Now, the way this prompt is rendered actually hides two subtle details that matter a lot for small models. [[open tasks.py 'def render_mc']] And I'll show you the function.
+[[circle "[' strawberry']"]] With a space in front, strawberry is a single token. One integer. The model never sees the letters! To count the r's, it would have to have memorized the spelling of every one of its fifty thousand tokens, and then count in its head, in a single forward pass. [[circle "['st', 'raw', 'berry']"]] And without a space, it's three tokens, which is a completely different set of integers again.
 
-```python from=tasks.py start="def render_mc" end="class MMLU" exec=0
-```
-
-[[circle '{choice}={letter}']] The first detail is that the letter comes after the choice, not before it. Big models don't care much, but for small models, having the letter right after the choice text helps them bind the letter to the choice. [[note '{choice}={letter}' 'no space!']] The second detail is that there is no space between the equals sign and the letter. And that's because of the tokenizer. Let's check.
+So nanochat has a synthetic task for this, called SpellingBee. Synthetic means we generate the data ourselves, as much as we want. And the interesting part is designing the ideal answer. We know the model can't do this in one step, so we write out a procedure that it can do: spell the word out, then go through the letters one at a time and keep a running count, then double check with python, and only then give the answer. Let's write it.
 
 ```python
-print(tokenizer.encode(" A"), tokenizer.encode("A"), tokenizer.encode("=A"))
+def spelling_answer(word, letter):
+    text = f"We are asked to find the number '{letter}' in the word '{word}'. Let me try a manual approach first.\n\n"
+    text += f"First spell the word out:\n{word}:{','.join(word)}\n\nThen count the occurrences of '{letter}':\n"
+    count = 0
+    for i, char in enumerate(word, 1):
+        if char == letter:
+            count += 1
+            text += f"{i}:{char} hit! count={count}\n"
+        else:
+            text += f"{i}:{char}\n"
+    text += f"\nThis gives us {count}.\n\nLet me double check this using Python:\n\n"
+    return [
+        {"type": "text", "text": text},
+        {"type": "python", "text": f"'{word}'.count('{letter}')"},
+        {"type": "python_output", "text": str(word.count(letter))},
+        {"type": "text", "text": f"\n\nPython gives us {word.count(letter)}.\n\nMy final answer is:\n\n#### {word.count(letter)}"},
+    ]
+
+for part in spelling_answer("strawberry", "r"):
+    print(f"[{part['type']}] {part['text']}")
 ```
 
-[[circle '[317]']] The token "space A" is a completely different token [[circle '[32]']] from the token "A". They have nothing to do with each other as far as the model is concerned, they're just different integers. And the assistant's answer is going to be the token "A" without a space. [[note '[28, 32]' 'the same token 32']] So in the prompt we want the exact same token to appear, so that the model can sort of just point back at it. If you remember the tokenization video, a lot of the weirdness of LLMs traces back to the tokenizer, and this is one of those little things.
+[[circle "strawberry:s,t,r,a,w,b,e,r,r,y"]] First, the spelling. [[circle "9:r hit! count=3"]] Then the counting, one letter per line, with a running count, so that no single token ever needs much computation. [[circle "[python] 'strawberry'.count('r')"]] Then python checks it, [[circle "#### 3"]] and the answer goes after the hash signs, so the same grader as GSM8K works. And I think this is a really nice example of how you have to think about the cognition of the model. Every token only gets a fixed amount of compute, one forward pass through twelve layers. So you want to spread the computation out over many tokens. If you ask the model to blurt out the answer in the first token, you're asking it to do all of the work in one forward pass, and it just can't. [[open tasks.py "class SpellingBee(Task):"]] In the repo, SpellingBee is this same function, plus a random word out of a list of 370,000 English words, a random letter, and a bunch of different ways of asking the question.
 
-The third one is GSM8K, grade school math. And this one is really interesting because the solutions use a calculator. Let's look at a raw example first.
+Okay, and the last piece is to mix all of these together. A mixture is just a big list of every example in every task, shuffled with a fixed seed. And if you want more of something, you just put it in twice.
 
 ```python
-gsm8k = GSM8K("train")
-print(gsm8k.row(0)["answer"])
+import random
+from tasks import MMLU, GSM8K, SpellingBee
+
+class TaskMixture:
+    def __init__(self, tasks):
+        self.tasks = tasks
+        self.index_map = [(t, i) for t, task in enumerate(tasks) for i in range(len(task))]
+        random.Random(42).shuffle(self.index_map) # mix the tasks together, the same way every time
+    def __len__(self):
+        return len(self.index_map)
+    def __getitem__(self, index):
+        t, i = self.index_map[index]
+        return self.tasks[t][i]
+
+mixture = TaskMixture([SmolTalk("train", stop=20000), MMLU("auxiliary_train", stop=20000),
+                       GSM8K("train"), GSM8K("train"), SpellingBee(size=20000, split="train")])
+print(len(mixture))
+print([type(mixture.tasks[t]).__name__ for t, _ in mixture.index_map[:8]])
 ```
 
-[[circle '<<2*12=24>>']] So you see these little things in double angle brackets? Those are the calculator annotations of the original dataset. So two times twelve equals twenty four is written as double angle bracket, two times twelve equals twenty four, double angle bracket. [[open tasks.py '# turn every <<expr=result>> into a python tool call, followed by its output']] And what we do in our task is we parse these out, and turn them into a python tool call, followed by the output of the tool.
+[[circle "74946"]] So about 75,000 conversations, [[underline "['SpellingBee', 'SpellingBee', 'GSM8K', 'SmolTalk', 'GSM8K', 'SmolTalk', 'MMLU', 'MMLU']"]] and the tasks are nicely interleaved. Now, I'm using small slices of SmolTalk and MMLU here, because we'll train on a CPU. In nanochat, on a GPU, it's all 460,000 SmolTalk conversations, and [[open chat_sft.py "train_dataset = TaskMixture(["]] here's the mixture in our chat_sft script. And remember what this mixture looks like, because it's going to matter later. Twenty thousand SpellingBee examples is more than a quarter of everything.
 
-```python from=tasks.py start="class GSM8K" end="    def evaluate(self, conversation, completion):" exec=0
-```
-
-```python
-ids, mask = tokenizer.render_conversation(gsm8k[0])
-print(tokenizer.visualize(ids, mask))
-```
-
-So now look at this. [[circle '<|python_start|>|2|*|12|<|python_end|>']] The model is trained to write "2 times 12", and then python end, [[circle '<|output_start|>|24|<|output_end|>']] and then the output tokens, the 24, are red. They're not trained on, because at test time they will be filled in by our python tool. [[underline '|24| sea| shells|']] And then the model copies that 24 into its answer. [[circle '|####| 16|']] And at the very end, the answer is given after four hash signs, and that's what we'll use to grade it. This is the simplest possible version of tool use. The model learns to offload arithmetic, which it is bad at, to a calculator, which is perfect at it.
-
-And the fourth one is my favorite. It's the SpellingBee task, which was added to nanochat so that it could answer the famous question, how many r's are there in strawberry. Now why is this hard for an LLM? Well, let's look at how strawberry is tokenized.
-
-```python
-print([tokenizer.decode([t]) for t in tokenizer.encode(" strawberry")])
-print([tokenizer.decode([t]) for t in tokenizer.encode("strawberry")])
-```
-
-[[circle '['"'"' strawberry'"'"']']] So "space strawberry" is a single token. It's just one integer. The model never sees the letters. It has to somehow memorize, for every one of its fifty thousand tokens, what letters are inside of it, and then count them in its head, in a single forward pass. That's really hard. [[circle '['"'"'st'"'"', '"'"'raw'"'"', '"'"'berry'"'"']']] And without a space in front, it's three tokens, "st", "raw", "berry", which is a completely different set of integers again.
-
-So SpellingBee is a synthetic task. [[open tasks.py 'class SpellingBee(Task):']] We generate as many examples as we want, [[point 'word = rng.choice(self.words)']] by taking a random word from a list of 370,000 English words [[point 'letter = rng.choice(word)']] and a random letter, [[point '# the ideal response: spell the word out, count by hand, double check with python']] and then we write out the ideal solution. Let's look at one.
-
-```python
-bee = SpellingBee(size=1000, split="train")
-for part in bee[3]["messages"][1]["content"]:
-    print(f"[{part['type']}]\n{part['text']}")
-```
-
-[[circle giftedness:g,i,f,t,e,d,n,e,s,s]] So the ideal answer first spells the word out letter by letter, and spelling is something the model can learn. [[circle '3:f hit! count=1']] Then it goes through the letters one at a time and keeps a running count, so that it never has to do too much computation in a single token. [[circle ''"'"'giftedness'"'"'.count('"'"'f'"'"')']] And then it double checks the answer with python, using the count method of strings, [[circle '#### 1']] and then gives a final answer. This is a really nice example of how you have to think about the cognition of the model. [[note '3:f hit! count=1' 'a little compute per token']] You want to spread the computation across many tokens, because every token only gets a fixed amount of compute, a single forward pass through twelve layers. If you ask the model to blurt out the answer immediately, you're asking it to do the whole computation in one forward pass, and it just can't.
-
-And then we mix all of these together. [[open tasks.py 'class TaskMixture(Task):']] In nanochat this is a TaskMixture, which just takes a list of tasks, [[highlight 'self.index_map = [(t, i) for t, task in enumerate(tasks) for i in range(len(task))]']] builds the full list of all their examples, [[circle 'random.Random(42).shuffle(self.index_map)']] and shuffles it with a fixed seed. And if you want to oversample something, [[open chat_sft.py 'GSM8K("train"), GSM8K("train"),']] you can just pass the same task in twice.
-
-```python from=tasks.py start="class TaskMixture" end="# ---" exec=0
-```
-
-```python from=chat_sft.py start="train_dataset = TaskMixture([" end="val_dataset" exec=0
-```
-
-> **Exercise:** Write your own synthetic task. For example, a task that teaches the model its own name and who made it, or a task that reverses a word. Generate the ideal response programmatically, and think about how to spread the computation across tokens.
+> **Exercise:** Write your own synthetic task. For example, a task that teaches the model its own name and who made it, or one that reverses a word letter by letter. Generate the ideal answer with code, and think about how to spread the work across tokens.
 
 ## The SFT dataloader
 
@@ -279,54 +441,136 @@ And then we mix all of these together. [[open tasks.py 'class TaskMixture(Task):
 @packed fill 1200 730 120 50 gray "" 28
 ```
 
-Okay, now we need to batch these conversations up so that we can train on them. And this is actually more interesting than you'd think.
+Okay, so now we need to turn conversations into batches. And in the pretraining videos this was trivial. [[draw stream]] We had one endless stream of text, and we just chopped it into rows of 1024 tokens. A document cut in half, who cares. [[draw chop]] But a conversation is different. If you cut it in half, you get a question without its answer, and an answer without its question. So we want every conversation in one piece, and we want every row to start with a BOS token, because that's what the model will see at test time.
 
-In pretraining, this was easy. [[draw stream]] We had one infinite stream of text, and we just chopped it up into rows of 1024 tokens. If a document got cut in half, who cares. But conversations are different. A conversation is a unit. [[draw chop]] If you chop a conversation in half, the second half starts with no user question, and the first half has no answer, so we really want every conversation to be in one piece. And also, every row should start at the beginning of a conversation, with a beginning of sequence token, because that's what it's going to look like at test time.
-
-[[draw naive]] So the naive approach is to put one conversation per row and pad the rest. But conversations are short. Most of them are a few hundred tokens, [[circle padding]] so you'd be wasting most of your compute on padding.
-
-The better approach is packing. [[draw packed]] We put as many whole conversations into each row as we can. And nanochat uses a "best fit" algorithm for this. We keep a buffer of, say, 100 conversations, and for each row, we keep grabbing the longest conversation in the buffer that still fits in the remaining space. [[circle '(pad)']] When nothing fits anymore, we pad the rest of the row, [[note '(pad)' 'never crop!']] and we never, ever crop. [[open chat_sft.py 'def sft_data_generator']] Let's look at the code.
-
-```python from=chat_sft.py start="def sft_data_generator" end="@torch.no_grad()"
-```
-
-[[point 'row, mask_row = [], []']] So we build up each row, and a mask row alongside it. [[circle 'mask_rows.append(mask_row + [0] * padding)']] The padding gets a mask of zero. And then at the end, here's the crux of it. [[highlight 'inputs, targets = batch[:, :-1], batch[:, 1:].clone()']] The inputs are the row without its last token, and the targets are the row shifted by one, exactly like in pretraining. [[circle 'targets[mask[:, 1:] == 0] = -1']] And then wherever the mask is zero, we set the target to minus one. [[open gpt.py ignore_index=-1]] And minus one is the ignore index of the cross entropy loss in our model. So those positions simply don't contribute to the loss.
-
-```python from=gpt.py start="        # targets of -1 are ignored" end="        return loss" exec=0
-```
-
-Let's try it out and see how efficient this is.
+So the first question is, how long are conversations? Let's measure.
 
 ```python
-from tasks import TaskMixture
-device = "cpu"
-small_mixture = TaskMixture([SmolTalk("train", stop=2000), MMLU("auxiliary_train", stop=2000), GSM8K("train"), bee])
-loader = sft_data_generator(small_mixture, batch_size=4, seq_len=512)
-num_tokens = num_padding = num_trained = 0
-for _ in range(20):
-    x, y, _ = next(loader)
-    num_tokens += x.numel()
-    num_padding += (x == tokenizer.bos).sum().item()
-    num_trained += (y >= 0).sum().item()
-print(f"fraction trained: {num_trained / num_tokens:.3f}, roughly fraction padding: {num_padding / num_tokens:.3f}")
+lengths = [len(tokenizer.render_conversation(mixture[i], max_tokens=10**6)[0]) for i in range(2000)]
+lengths.sort()
+print(f"median {lengths[1000]}, 90th percentile {lengths[1800]}, max {lengths[-1]}")
+print(f"fraction longer than 512 tokens: {sum(l > 512 for l in lengths) / len(lengths):.3f}")
 ```
 
-[[circle 'fraction trained: 0.397']] So only about 40 percent of the tokens are actually trained on. The rest is user prompts and special tokens. [[circle 'roughly fraction padding: 0.033']] And the padding is only about 3 percent, and that number even includes the beginning of sequence token of every conversation, so best fit packing wastes almost nothing. But it does mean that in SFT, a batch of a given size carries a lot less signal than in pretraining, where every single token is a target.
+[[circle "median 217"]] Half of them are shorter than about 200 tokens. [[circle "90th percentile 1072"]] But there's a long tail, ten percent are over a thousand tokens, [[note "max 20317" "!!"]] and the longest is 20,000. [[circle "fraction longer than 512 tokens: 0.202"]] And with the rows of 512 tokens we're going to use on the CPU, one in five conversations won't fit. Keep that number in mind.
 
-Now I want to tell you about a bug that I hit while writing this, because it's really instructive. [[open chat_sft.py 'max_tokens=row_capacity + 1)']] In my first version, I rendered every conversation with a maximum length, and if it was longer than a row, I just truncated it. Seems harmless, right? But when I ran a small test, the loss came out as nan, and the number of trained tokens was zero. So what happened? Well, MMLU's auxiliary train set has a lot of really long reading comprehension questions, and the answer is a single letter at the very end. If you truncate that, you cut off the answer, and you're left with a conversation that's all prompt and no green tokens at all. And the best fit algorithm loves these, because they are exactly as long as a row! So it was filling entire batches with conversations that have nothing to train on. And the mean over zero tokens is zero divided by zero, which is nan. [[circle 'if len(ids) <= row_capacity:']] The fix is the one line you see here: if a conversation doesn't fit in a row, we skip it. [[note 'if len(ids) <= row_capacity:' 'skip it, never crop']] That's what "we never crop" means.
+[[draw naive]] Okay so the simplest thing we could do is one conversation per row, and fill up the rest of the row with padding. And we don't train on the padding, so it gets a mask of zero. Let's measure how much of the batch is wasted.
 
-> **Exercise:** Measure how much padding you'd have with the naive one-conversation-per-row approach, compared to best fit packing.
+```python
+def naive_batch(dataset, start, batch_size, seq_len):
+    rows, masks = [], []
+    for i in range(start, start + batch_size):
+        ids, mask = tokenizer.render_conversation(dataset[i], max_tokens=seq_len + 1)
+        pad = seq_len + 1 - len(ids)
+        rows.append(ids + [tokenizer.bos] * pad)
+        masks.append(mask + [0] * pad)
+    return torch.tensor(rows), torch.tensor(masks)
+
+rows, masks = naive_batch(mixture, 0, 64, 512)
+print(f"padding: {(rows == tokenizer.bos).float().mean():.3f}, trained on: {masks.float().mean():.3f}")
+```
+
+[[circle "padding: 0.473"]] 47 percent of every batch is padding. Half of our compute would be spent on nothing. [[circle "trained on: 0.255"]] And only a quarter of the tokens are actually trained on. That's terrible.
+
+[[draw packed]] So the better idea is packing. We put several whole conversations into every row. And the algorithm nanochat uses is called best fit. We keep a buffer of a hundred conversations, and to fill a row, we keep grabbing the longest conversation in the buffer that still fits in the space that's left. [[circle "(pad)"]] And only when nothing fits anymore, we pad the rest of the row. Long conversations go first, and the short ones fill in the gaps. [[note "(pad)" "never crop!"]] And we never cut a conversation.
+
+But before I show you the code, I want to tell you about a bug I hit writing this, because it's really instructive. In my first version, I rendered every conversation with max tokens set to the row length, so long conversations just got truncated. Seems harmless, right? Let's see what that does to a long multiple choice question.
+
+```python
+long_mcq = next(c for c in MMLU("auxiliary_train") if len(tokenizer.render_conversation(c, max_tokens=10**6)[0]) > 600)
+ids, mask = tokenizer.render_conversation(long_mcq, max_tokens=513)
+print(len(ids), sum(mask))
+import torch.nn.functional as F
+logits = torch.randn(1, 4, 50304)
+print(F.cross_entropy(logits.view(-1, 50304), torch.tensor([-1, -1, -1, -1]), ignore_index=-1))
+```
+
+[[circle "513 0"]] 513 tokens, and a mask that sums to zero. Not a single trainable token! These MMLU training questions include long reading passages, and the answer, the one green token, is at the very end. So truncation cut off the answer, and the whole conversation became prompt. [[note "513 0" "nothing to train on"]] And here's the evil part. The best fit algorithm loves these, because they're exactly the length of a row. [[circle "tensor(nan)"]] So it filled whole batches with them, and the loss on a batch with zero trainable tokens is zero divided by zero, which is not a number. My loss was NaN, and it took me a minute to figure out why. So the fix is simple: if a conversation doesn't fit in a row, we skip it. Okay, now let's write the real thing.
+
+```python
+def sft_data_generator(dataset, batch_size, seq_len, buffer_size=100):
+    row_capacity = seq_len + 1 # +1 because the targets are the inputs shifted by one
+    buffer, cursor = [], 0
+    while True:
+        rows, mask_rows = [], []
+        for _ in range(batch_size):
+            row, mask_row = [], []
+            while True:
+                while len(buffer) < buffer_size:
+                    ids, mask = tokenizer.render_conversation(dataset[cursor % len(dataset)], max_tokens=row_capacity + 1)
+                    if len(ids) <= row_capacity: # skip the (rare) conversations too long to ever fit
+                        buffer.append((ids, mask))
+                    cursor += 1
+                remaining = row_capacity - len(row)
+                fits = [i for i, (ids, _) in enumerate(buffer) if len(ids) <= remaining]
+                if not fits:
+                    break
+                ids, mask = buffer.pop(max(fits, key=lambda i: len(buffer[i][0])))
+                row += ids
+                mask_row += mask
+            padding = row_capacity - len(row)
+            rows.append(row + [tokenizer.bos] * padding)
+            mask_rows.append(mask_row + [0] * padding) # never train on the padding
+        batch, mask = torch.tensor(rows), torch.tensor(mask_rows)
+        inputs, targets = batch[:, :-1], batch[:, 1:].clone()
+        targets[mask[:, 1:] == 0] = -1 # only train on the assistant's tokens: -1 is ignored by the loss
+        yield inputs, targets, cursor / len(dataset)
+
+loader = sft_data_generator(mixture, batch_size=64, seq_len=512)
+x, y, _ = next(loader)
+x, y, _ = next(loader)
+print(x.shape, y.shape)
+print(f"padding: roughly {(x == tokenizer.bos).float().mean():.3f}, trained on: {(y >= 0).float().mean():.3f}")
+```
+
+So let's read it. [[point "row_capacity = seq_len + 1"]] The rows have one extra token, because the targets are the inputs shifted by one. [[circle "if len(ids) <= row_capacity:"]] Here's the fix for my bug, we skip conversations that are too long. [[circle "ids, mask = buffer.pop(max(fits, key=lambda i: len(buffer[i][0])))"]] Here's best fit, the longest one that fits. [[circle "mask_rows.append(mask_row + [0] * padding)"]] The padding gets a mask of zero. [[highlight "inputs, targets = batch[:, :-1], batch[:, 1:].clone()"]] Then inputs and targets, exactly like in pretraining. [[circle "targets[mask[:, 1:] == 0] = -1"]] And wherever the mask is zero, we set the target to minus one. [[open gpt.py "ignore_index=-1"]] And minus one is the ignore index of the cross entropy loss in our model. So those positions simply don't count.
+
+[[notebook]] [[circle "padding: roughly 0.081"]] With packing, the padding goes down to about 8 percent, and that even includes the BOS tokens at the start of every conversation. [[circle "trained on: 0.419"]] And 42 percent of the tokens are trained on, instead of 25. That's almost twice as much signal from the same compute. Let's do one more sanity check, on our tiny France conversation, and look at the inputs and targets side by side.
+
+```python
+small = sft_data_generator([conversation], batch_size=1, seq_len=12, buffer_size=1)
+x, y, _ = next(small)
+print([tokenizer.decode([t]) for t in x[0].tolist()])
+print(y[0].tolist())
+```
+
+[[underline "['<|endoftext|>', '<|user_start|>', 'What', ' is', ' the', ' capital', ' of', ' France', '?', '<|user_end|>', '<|assistant_start|>', 'Paris']"]] So the inputs are the conversation without its last token. [[circle "[-1, -1, -1, -1, -1, -1, -1, -1, -1, -1,"]] And the targets are minus one everywhere, [[circle "40313, 50260]"]] except at the last two positions. After assistant start, the target is Paris, and after Paris, the target is assistant end. Those are the only two predictions that this conversation trains.
+
+> **Exercise:** Change the dataloader so that a conversation that's too long gets cropped in a smarter way, keeping the last assistant answer, instead of being skipped. Is it worth it? Measure how many trained tokens you gain.
 
 ## The SFT training loop
 
-Okay so now we can write the training loop, and the punchline is that SFT is literally just pretraining, with a different dataloader. It's the same model, the same cross entropy loss, the same optimizer. [[open gpt.py ignore_index=-1]] The only difference is the minus ones in the targets. Let's look.
+Okay, and now the punchline of this whole stage. SFT is literally just pretraining with a different dataloader. Same model, same cross entropy loss, same AdamW optimizer, same training loop. The only differences are the minus ones in the targets, and a gentler learning rate. [[write "SFT = pretraining + a different dataloader"]] The model already knows a lot, we're just nudging its statistics, so we use a smaller learning rate than in pretraining, keep it constant for the first half, and then decay it to zero.
 
-```python from=chat_sft.py start="optimizer = model.configure_optimizer" end="path = os.path.join" exec=0
+```python
+def get_lr(progress, lr=1e-4, warmdown_ratio=0.5):
+    if progress < 1 - warmdown_ratio:
+        return lr
+    return lr * (1 - progress) / warmdown_ratio
+
+print([f"{get_lr(p):.1e}" for p in [0.0, 0.25, 0.5, 0.75, 0.9, 1.0]])
 ```
 
-[[circle 'optimizer = model.configure_optimizer(lr=args.lr, weight_decay=0.0)']] The optimizer is AdamW, the same as in the GPT-2 video. [[highlight 'def get_lr(progress):']] The learning rate is constant for the first half of training, [[circle 'return args.lr * (1 - progress) / args.warmdown_ratio']] and then decays linearly to zero. That's the schedule that nanochat uses. There's no warmup, [[circle weight_decay=0.0]] and there's no weight decay. The learning rate is a lot lower than in pretraining, we're not trying to learn the internet again, we're just gently nudging the statistics of a model that already knows a lot.
+[[circle "'1.0e-04', '1.0e-04', '1.0e-04'"]] Constant for the first half, [[circle "'5.0e-05', '2.0e-05', '0.0e+00'"]] then down to zero at the end. That's the schedule nanochat uses. And now, let's actually train, right here in the notebook. A fresh copy of GPT-2, AdamW, our dataloader with small rows of 256 tokens, and the training loop you've written ten times by now.
 
-In nanochat, [[open chat_sft.py --num-iterations]] the default is to do one full epoch over the whole mixture. Here, on a GPU, that's around 600,000 conversations, and it takes something like half an hour on a single A100. But I want to show you that you don't need a GPU to see this work. [[open chat_sft.py 'CPU (a quick demo']] So I'm going to run a much smaller version, on a plain four core CPU: 600 steps of four rows of 512 tokens each. That takes about an hour and a half.
+```python
+torch.manual_seed(1337)
+student = GPT.from_pretrained()
+optimizer = student.configure_optimizer(lr=1e-4)
+loader = sft_data_generator(mixture, batch_size=4, seq_len=256)
+for step in range(8):
+    x, y, _ = next(loader)
+    loss = student(x, y)
+    loss.backward()
+    optimizer.step()
+    optimizer.zero_grad(set_to_none=True)
+    print(f"step {step} | loss {loss.item():.4f} | trained tokens {(y >= 0).sum().item()}")
+del student, optimizer
+```
+
+[[circle "step 0 | loss 3.3616"]] And the loss is going down. [[circle "step 7 | loss 1.6392"]] From 3.4 to 1.6 in eight steps. [[point "trained tokens 243"]] And notice how the number of trained tokens jumps around from batch to batch, that's because every batch has a different mix of conversations, so the loss of a single step is noisy.
+
+So that's SFT. Everything else is engineering. [[open chat_sft.py "def sft_data_generator"]] I've put the dataloader, [[open chat_sft.py "def get_lr(progress):"]] the schedule and the loop into chat_sft.py, plus command line arguments, a validation loss every hundred steps, gradient accumulation, bfloat16 and torch compile on a GPU, and saving the checkpoint at the end. In nanochat, you do one full epoch over the whole mixture, which on a single A100 is something like half an hour. [[open chat_sft.py "CPU (a quick demo"]] But to show you that you don't need a GPU, I ran a smaller version on a plain four core CPU. 600 steps of four rows of 512 tokens, about an hour and a half.
 
 ```bash
 python chat_sft.py --device-batch-size=4 --seq-len=512 --grad-accum=1 --num-iterations=600 --smoltalk=20000 --mmlu=20000
@@ -352,12 +596,13 @@ step   600 | val loss 1.3377
 Saved the SFT model to /root/.cache/nanochat-posttrain/chatsft.pt
 ```
 
-So look at the very first step. [[circle 'loss 11.8539']] The loss is 11.9, and that's the special tokens we talked about, the model is confidently wrong about them. [[circle 'trained tokens 8 |']] But also look at the number of trained tokens: eight. In the entire first batch of four rows of 512 tokens, there were only eight tokens to train on. And that's the best fit algorithm at work. At the start, the longest conversations in the buffer are those long MMLU reading comprehension questions, so each row gets one of them, and each one has exactly two green tokens, the letter and the assistant end. [[circle 'trained tokens 428']] Then step two has 428 trained tokens and a loss of 2.6. So the training loss per step is really noisy, because every batch has a completely different composition, and it's much better to look at the validation loss. [[circle 'val loss 2.7305']] And the validation loss goes down nicely, from 2.73 [[circle 'val loss 1.3377']] to 1.34.
+Now look at the very first step. [[circle "loss 11.8539"]] A loss of 11.9. Why so much higher than in our notebook run? [[circle "trained tokens 8 |"]] Look at the number of trained tokens. Eight. In the whole first batch! Can you figure out why? It's best fit. At the start, the buffer is full, and the longest conversations in it are those long MMLU reading passages. So every row is one of them, and each one has exactly two green tokens, the letter and assistant end. And assistant end is one of our special tokens, the ones that start out with a loss of 15. [[circle "trained tokens 428"]] Then in step two there are 428 trained tokens, and the loss is a normal 2.6. So the loss of a single step can be really misleading, [[circle "val loss 2.7305"]] and that's why we look at the validation loss, [[circle "val loss 1.3377"]] which goes down smoothly, from 2.73 to 1.34.
 
-Okay, so now the fun part. Let's talk to it. I'm going to write a little chat function, that renders a conversation, primes the assistant, and samples until the assistant end token.
+Okay, now the fun part. Let's talk to it. Here's a little chat function: it puts the question in a conversation, renders it for completion, and samples until assistant end.
 
 ```python
 from gpt import load_model
+device = "cpu"
 sft_model = load_model("sft", device).eval()
 sft_engine = Engine(sft_model, tokenizer)
 
@@ -370,27 +615,27 @@ def chat(question, engine=sft_engine, temperature=0.0, seed=42, max_tokens=100):
 print(chat("Hi! Who are you?", temperature=0.7, seed=1))
 ```
 
-[[circle 'Hello! How can I help you today?']] "Hello! How can I help you today?" And then it stopped. [[note 'Hello! How can I help you today?' 'it stopped by itself!']] It emitted the assistant end token, all by itself. Compare that to the base model, which would have just kept going forever, writing both sides of the conversation. So that's the format, learned. Let's ask it about France again.
+[[circle "Hello! How can I help you today?"]] "Hello! How can I help you today?" And then it stopped. [[note "Hello! How can I help you today?" "it stopped by itself!"]] All by itself, it emitted assistant end. Compare that to the base model, which kept going forever. So the format, the turn taking, that's learned. Let's ask about France.
 
 ```python
 print(chat("What is the capital of France?"))
 ```
 
-[[circle 'The capital of France is Paris, France.']] So it answers directly now, as an assistant, "The capital of France is Paris". [[underline 'the capital of France, the capital of France, the capital of France']] But then it gets stuck in a loop. And this is a very common failure of greedy decoding with small models: once it has said "the capital of France" a couple of times, the most likely next thing is to say it again, and it falls into a rut that it can't get out of. Sampling with a temperature helps. But let me show you something even more interesting.
+[[circle "The capital of France is Paris, France."]] It answers directly now, as an assistant. [[underline "the capital of France, the capital of France, the capital of France"]] But then it gets stuck in a loop. This is a classic failure of greedy decoding with small models: once it has said "the capital of France" twice, the most likely thing is to say it again. Sampling with a temperature helps, so let's try that.
 
 ```python
 print(chat("What is the capital of France?", temperature=0.7, seed=2, max_tokens=150))
 ```
 
-Ha! Look at this. [[circle 'We are asked to find the capital of France.']] "We are asked to find the capital of France. Let me try a manual approach first." [[circle France:f,a,l,e,r,n,e,s,t]] And then it spells France, badly, [[point '1:f hit! count=1']] counts the letter f, [[circle ''"'"'f'"'"'.count('"'"'f'"'"')']] and calls python to double check. It's running the SpellingBee procedure on a geography question! So what's going on here? Well, in this little CPU run, [[open chat_sft.py 'SpellingBee(size=20000, split="train"),']] SpellingBee is twenty thousand of the 75,000 conversations, so more than a quarter of everything the model saw. And a lot of the SpellingBee questions are short questions like "What is the count of e in some word". So "What is the capital of France" sort of looks like one of those, on the surface, and the model pattern matches on the surface form. If I sample answers to thirty real questions from the SmolTalk test set, only two of them start like this, so it's mostly the short questions. But it's a really good lesson about the data mixture. Every dataset you put in there shapes the behavior of the model, in ways that leak out beyond the dataset itself. In fact, when SpellingBee was added to nanochat, Karpathy noted in the commit that it probably uses way too many of these synthetic examples. [[notebook]] On a GPU, with a full epoch, SmolTalk dominates the mixture and this mostly goes away.
+Ha! Look at this. [[circle "We are asked to find the capital of France."]] "We are asked to find the capital of France. Let me try a manual approach first." [[circle "France:f,a,l,e,r,n,e,s,t"]] And then it spells France, badly, [[point "1:f hit! count=1"]] counts the letter f, [[circle "'f'.count('f')"]] and calls python to double check. It's running the SpellingBee procedure on a geography question! Why? Remember the mixture. [[open chat_sft.py 'SpellingBee(size=20000, split="train"),']] SpellingBee is more than a quarter of everything this model saw. And a lot of SpellingBee questions are short questions, like "what is the count of e in some word". So "what is the capital of France" looks like one of those on the surface, and the model pattern matches on the surface. If I sample answers to thirty real questions from the SmolTalk test set, only two start like this, so it's mostly short questions. But it's a great lesson. Every dataset in the mixture shapes the model, in ways that leak out beyond that dataset. When Karpathy added SpellingBee to nanochat, he noted in the commit that it probably uses too many of these examples. [[notebook]] And on a GPU, with all of SmolTalk in the mixture, this mostly goes away.
 
 ```python
 print(chat("Why is the sky blue?", temperature=0.7, seed=1))
 ```
 
-[[circle 'the meteoroid and the meteorite']] And this one is kind of hilarious, meteoroids [[circle 'molten metal']] and molten metal. So let's be honest about what we have here. This is a 124 million parameter model from 2019, finetuned for an hour and a half on a CPU. It doesn't really know why the sky is blue, and it's very happy to make things up, with total confidence. The nanochat README says that talking to its speedrun model is a bit like talking to a kindergartener, and we're well below that. But the format is there, the turn taking is there, and as we'll see, on the narrow tasks that we specifically trained for, it can actually do quite well.
+[[circle "the meteoroid and the meteorite"]] And this one is kind of hilarious, meteoroids and [[circle "molten metal"]] molten metal. So let's be honest about what we have. This is a 124 million parameter model from 2019, finetuned for an hour and a half on a CPU. It doesn't know why the sky is blue, and it's happy to make things up with total confidence. The nanochat README says talking to its speedrun model is like talking to a kindergartener, and we're well below that. But the format is there, the turn taking is there, and as we'll see, on the narrow tasks we specifically trained for, it can do quite well.
 
-> **Exercise:** Re-run SFT with fewer SpellingBee examples, say five thousand instead of twenty thousand, and measure how often the model answers ordinary questions with "We are asked to find". What happens to its SpellingBee accuracy?
+> **Exercise:** Re-run SFT with five thousand SpellingBee examples instead of twenty thousand, and measure how often the model starts an ordinary answer with "We are asked to find". What happens to its SpellingBee accuracy?
 
 ## The inference engine
 
@@ -412,83 +657,153 @@ print(chat("Why is the sky blue?", temperature=0.7, seed=1))
 @prefill text 40 680 "many samples: prefill the prompt once, then copy the cache" 34 purple
 ```
 
-Okay, so now let's talk about the Engine, which is what we've been using to sample from the model. [[open engine.py 'class Engine:']] In nanochat, the engine has two jobs. [[point 'def generate(self, tokens, num_samples=1']] The first is to make sampling fast, [[open engine.py 'def use_calculator(expr):']] and the second is to run the tools.
-
-So first, why is naive sampling slow? [[draw seq]] Well, think about what we do in a naive sampling loop. We take the whole sequence, run it through the transformer, get the logits at the last position, sample a token, append it, [[draw naive]] and then run the whole sequence through the transformer again. But for all the tokens that we already processed, nothing changed! Their keys and values in every attention layer are exactly the same as last time, because of the causal mask, a token can never be affected by tokens that come after it. So we're recomputing the same things over and over, and for long sequences this gets really wasteful.
-
-The fix is the KV cache. [[draw cache]] We keep the keys and values of every layer around, and when a new token comes in, we only compute the query, key and value for that one token, append the new key and value to the cache, [[point 'new: q, k, v']] and let the single new query attend to everything in the cache. [[open gpt.py 'class KVCache:']] Here's the KV cache in our gpt.py. It is tiny.
-
-```python from=gpt.py start="class KVCache" end="class CausalSelfAttention" exec=0
-```
-
-```python from=gpt.py start="class CausalSelfAttention" end="class MLP" exec=0
-```
-
-So in the attention, if there's a cache, [[circle 'k, v = kv_cache.update(k, v)']] we append the new keys and values and get back the full keys and values. And one subtle thing: [[circle 'is_causal=T > 1']] if we're feeding in a single token, we don't want a causal mask at all, because that one new token is allowed to look at everything before it. [[open gpt.py 't0 = 0 if kv_cache is None']] And in the model's forward, the positions have to start where the cache left off, [[circle 'pos = torch.arange(t0, t0 + T']] otherwise the new token would get the position embedding of position zero. Let's make sure the cache actually gives exactly the same answer, and see how much faster it is.
+Okay, so far we've been using the Engine to sample, as a black box. Now let's write it. Sampling has two problems that we need to solve: it needs to be fast, because in reinforcement learning we're going to sample a lot, and it needs to run the python tool. Let's start with speed. Here's the simplest sampling loop you could write, the one from the GPT-2 video.
 
 ```python
 import time
+@torch.no_grad()
+def generate_naive(model, prompt, max_tokens):
+    ids = torch.tensor([prompt])
+    for _ in range(max_tokens):
+        logits = model(ids)[:, -1, :] # run the WHOLE sequence through the model, every time
+        ids = torch.cat([ids, logits.argmax(dim=-1, keepdim=True)], dim=1)
+    return ids[0].tolist()
+
 prompt = [tokenizer.bos] + tokenizer.encode("The meaning of life is")
+t0 = time.time()
+naive = generate_naive(model, prompt, 100)
+print(f"naive: {time.time() - t0:.2f}s")
+```
+
+[[circle "naive:"]] Several seconds for 100 tokens. Why is it slow? [[draw seq]] Think about what this loop does. To get token number 7, it runs tokens 1 through 6 through the model. Then to get token 8, it runs tokens 1 through 7 through the model, [[draw naive]] all of them, again. But nothing about tokens 1 through 6 has changed! Because of the causal mask, a token can only look at tokens before it, so its keys and values in every layer are exactly the same as last time. We're recomputing them over and over, and the total work grows like the square of the length.
+
+[[draw cache]] So the fix is to remember them. That's the KV cache. For every layer, we keep the keys and values of all the tokens so far, and when a new token comes in, we only compute the query, key and value for that one token, append its key and value to the cache, [[point "new: q, k, v"]] and let its query attend to everything in the cache. Now, this needs three small changes inside our GPT, and you should make them in your own gpt.py from the GPT-2 video. [[open gpt.py "class KVCache:"]] Change one is the cache itself. [[circle "def update(self, k, v):"]] It's a tiny class that holds the keys and values, and update appends the new ones and returns everything. [[open gpt.py "k, v = kv_cache.update(k, v)"]] Change two is in the attention. [[circle "k, v = kv_cache.update(k, v)"]] If there's a cache, we append and get back all the keys and values. [[circle "is_causal=T > 1"]] And here's a subtle one. If we feed in a single new token, we don't want a causal mask at all, because that one token is allowed to look at everything in the cache. [[open gpt.py "t0 = 0 if kv_cache is None"]] And change three, the positions. [[circle "pos = torch.arange(t0, t0 + T"]] The position embedding of the new token must start where the cache left off, otherwise every new token would think it's at position zero. And with that, here's sampling with a cache.
+
+```python
+from gpt import KVCache
+
+@torch.no_grad()
+def generate_cached(model, prompt, max_tokens):
+    kv_cache = [KVCache() for _ in range(model.config.n_layer)]
+    logits = model(torch.tensor([prompt]), kv_cache=kv_cache)[:, -1, :] # prefill: the whole prompt, once
+    out = list(prompt)
+    for _ in range(max_tokens):
+        token = logits.argmax(dim=-1).item()
+        out.append(token)
+        logits = model(torch.tensor([[token]]), kv_cache=kv_cache)[:, -1, :] # decode: one token at a time
+    return out, kv_cache
 
 t0 = time.time()
-ids = torch.tensor([prompt])
-with torch.no_grad():
-    for _ in range(100):
-        next_id = model(ids)[:, -1, :].argmax(dim=-1, keepdim=True) # recompute everything, every time
-        ids = torch.cat([ids, next_id], dim=1)
-t1 = time.time()
-out, _ = engine.generate_batch(prompt, max_tokens=100, temperature=0.0)
-t2 = time.time()
-print(f"naive: {t1 - t0:.2f}s, with kv cache: {t2 - t1:.2f}s, same result: {ids[0].tolist() == out[0]}")
+cached, kv_cache = generate_cached(model, prompt, 100)
+print(f"cached: {time.time() - t0:.2f}s, same tokens: {cached[:len(naive)] == naive}")
+print(kv_cache[0].k.shape)
 ```
 
-[[circle naive:]] So with the KV cache, generating these 100 tokens [[circle 'with kv cache:']] is about four times faster on my CPU, [[circle 'same result: True']] and the result is exactly the same, token for token. And that gap only grows with length, because the naive version reprocesses the whole sequence for every new token, so the total work grows quadratically, while with the cache every new token costs about the same.
+[[point "logits = model(torch.tensor([prompt]), kv_cache=kv_cache)[:, -1, :]"]] First we run the whole prompt through once, which fills the cache. That's called the prefill. [[point "logits = model(torch.tensor([[token]]), kv_cache=kv_cache)[:, -1, :]"]] And then every step, we only feed in the one new token. [[circle "same tokens: True"]] Exactly the same tokens as the naive version, which is the first thing to always check, [[circle "cached:"]] and about four times faster. And that gap grows with length. [[circle "torch.Size([1, 12, 106, 64])"]] And here's the cache of the first layer: batch of one, twelve heads, 106 positions, which is our 6 prompt tokens plus 100 new ones, and 64 dimensions per head.
 
-The other trick in the engine is for when we want many samples for the same prompt, which is going to be very important for reinforcement learning. [[draw prefill]] We process the prompt once, with a batch size of one, [[open engine.py '# 1) prefill']] and this is called the prefill. [[circle 'c.expand(num_samples)']] And then we just copy the cache for every sample, and then decode all the samples in parallel, as one batch.
+[[draw prefill]] One more trick, which we'll need for reinforcement learning. Often we want many samples for the same prompt. So we do the prefill once, with a batch size of one, and then we just copy the cache for every sample, and decode all of them in parallel, as one batch.
 
-Now the second job of the engine is tool use. And this is where it gets kind of cute. [[open engine.py '# 3) decode, one token at a time']] Let's look at the main loop.
+Okay, now the second job, tools. Before I show you, think about it for a second. The model is sampling one token at a time. At some point it emits python start, then some tokens, then python end. What should happen, and what should the model see next?
 
-```python from=engine.py start="        # 3) decode, one token at a time" end="            yield column, masks" exec=0
+Here's the idea. When we sample python start, we start recording the tokens. When we sample python end, we decode the recorded tokens into a string, and we run it. And then here's the trick. We put output start, the tokens of the result, and output end into a queue, and on the next steps, instead of using what the model sampled, we take tokens from the queue. We force them in. So the result appears in the model's own context, as if it had written it, and then it just continues from there. Let's write it.
+
+```python
+from collections import deque
+from engine import use_calculator
+
+@torch.no_grad()
+def generate_with_tools(model, prompt, max_tokens=256):
+    s = tokenizer.encode_special
+    kv_cache = [KVCache() for _ in range(model.config.n_layer)]
+    logits = model(torch.tensor([prompt]), kv_cache=kv_cache)[:, -1, :]
+    out, forced, expr = [], deque(), None
+    for _ in range(max_tokens):
+        token = forced.popleft() if forced else logits.argmax(dim=-1).item()
+        out.append(token)
+        if token == s("<|assistant_end|>"):
+            break
+        if token == s("<|python_start|>"):
+            expr = [] # start recording the expression
+        elif token == s("<|python_end|>") and expr is not None:
+            result = use_calculator(tokenizer.decode(expr)) # run the tool...
+            if result is not None: # ...and force its output into the stream
+                forced.extend([s("<|output_start|>"), *tokenizer.encode(str(result)), s("<|output_end|>")])
+            expr = None
+        elif expr is not None:
+            expr.append(token)
+        logits = model(torch.tensor([[token]]), kv_cache=kv_cache)[:, -1, :]
+    return out
+
+question = {"messages": [{"role": "user", "content": "How many u are in the word eurytherm"}, {"role": "assistant", "content": ""}]}
+print(tokenizer.decode(generate_with_tools(sft_model, tokenizer.render_for_completion(question))))
 ```
 
-> **Exercise:** Before I explain it, pause and think about it. The model is sampling tokens one at a time. At some point it emits python start, then some tokens, then python end. What exactly should the engine do at that point, and what should the model see next?
+[[circle "token = forced.popleft() if forced else logits.argmax(dim=-1).item()"]] So every step, if there are forced tokens waiting, we take one, otherwise we use the model's choice. [[circle "expr = [] # start recording the expression"]] On python start we start recording, [[circle "result = use_calculator(tokenizer.decode(expr)) # run the tool..."]] on python end we run it, [[circle 'forced.extend([s("<|output_start|>"), *tokenizer.encode(str(result)), s("<|output_end|>")])']] and we queue up the result. And let's try it on our SFT model, on a spelling question it has never seen. [[circle "eurytherm:e,y,u,r,e,r,m,e,r"]] So look at what happens. It spells the word, and it gets the spelling wrong! e, y, u, r. It roughly knows which letters are in there, but not in which order, because remember, it never sees the letters. [[circle "3:u hit! count=1"]] Then it counts the u's in its own misspelled version and gets one, which happens to be right. [[circle "<|python_start|>'eurytherm'.count('u')<|python_end|>"]] Then it writes the python call, and in the python call it copies the word perfectly, because copying tokens is easy. [[note "<|output_start|>1<|output_end|>" "forced in by us"]] And our code runs it and forces in the result. [[circle "#### 1<|assistant_end|>"]] And the final answer is one. So the tool is robust to the model's own sloppiness.
 
-[[point 'forced = [deque() for _ in range(num_samples)]']] So every row keeps a little bit of state. [[circle 'elif token == python_start:']] When the model samples python start, we start recording the tokens of the expression. [[circle 'result = use_calculator(self.tokenizer.decode(python_expr[i]))']] When it samples python end, we decode the expression, and evaluate it with our calculator. And then here's the trick: [[circle 'forced[i].extend([output_start, *self.tokenizer.encode(str(result)), output_end])']] we put output start, the tokens of the result, and output end into a queue of forced tokens. And on the next steps, [[circle 'token = forced[i].popleft() if is_forced else sampled[i]']] instead of using what the model sampled, we pop tokens from that queue. So the model sees the result of the tool appear in its own context, as if it wrote it, and then it continues sampling from there. [[circle 'masks.append(0 if is_forced else 1)']] And we also return a mask, one for sampled tokens and zero for forced tokens, and you'll see why that matters in reinforcement learning.
+Now, a word about safety. [[open engine.py "def use_calculator(expr):"]] We're running code that a neural network wrote, so the calculator is deliberately very restricted. [[highlight 'is_math = all(c in "0123456789*+-/.() " for c in expr) and "**" not in expr']] It allows numbers and arithmetic, without powers, [[highlight '".count(" in expr']] or the count method of a string, [[circle '{"__builtins__": {}}']] and it evaluates without any builtins.
 
-[[open engine.py 'def use_calculator(expr):']] The calculator itself is deliberately very restricted. [[highlight 'is_math = all(c in "0123456789*+-/.() " for c in expr)']] We only allow numbers and arithmetic, [[highlight '".count(" in expr']] or the count method of a string, [[circle '{"__builtins__": {}}']] and we evaluate without any builtins. You really don't want to give a language model an unrestricted eval on your machine. In nanochat it's the same story, and there's a separate, more careful sandbox for running real python code.
-
-```python from=engine.py start="def use_calculator" end="@torch.no_grad()" exec=0
+```python
+print(use_calculator("2*12"), use_calculator("'strawberry'.count('r')"))
+print(use_calculator("__import__('os').system('ls')"), use_calculator("9**9**9"))
 ```
 
-Let's watch it in action. Here's a SpellingBee question from the test set, and I'm going to visualize what comes out of the engine, where green tokens were sampled by the model, and red tokens were forced in by the engine.
+[[circle "24 3"]] So arithmetic and counting work, [[circle "None None"]] and an attempt to run a shell command, or to compute a gigantic number, just returns None. Never give a language model an unrestricted eval on your machine.
+
+[[open engine.py "class Engine:"]] And the Engine in the repo is exactly what we just wrote, [[point "for i in range(num_samples):"]] but for a whole batch of samples at once, with every row keeping its own little state, [[circle "c.expand(num_samples)"]] the prefill once and copy trick, [[circle "masks.append(0 if is_forced else 1)"]] and one more thing: it returns a mask, one for tokens the model sampled, and zero for tokens that were forced in. Remember that mask, because we'll need it for reinforcement learning. Let's sample eight answers to the same question.
 
 ```python
 example = SpellingBee(size=10, split="test")[6]
-print(example["messages"][0]["content"])
 ids = tokenizer.render_for_completion(example)
-out, masks = sft_engine.generate_batch(ids, max_tokens=256, temperature=0.0)
-print(tokenizer.visualize(out[0][len(ids):], masks[0][len(ids):]))
+out, masks = sft_engine.generate_batch(ids, num_samples=8, max_tokens=256, temperature=1.0, top_k=50, seed=0)
+print(example["messages"][0]["content"])
+for o, m in zip(out, masks):
+    completion = tokenizer.decode(o[len(ids):])
+    print(f"answer {extract_answer(completion)} | {len(o) - len(ids)} tokens, {m[len(ids):].count(0)} forced in by the tool")
 ```
 
-So look at what happened here, because this is a really nice little example. [[point 'How many u are in the word eurytherm']] The question is how many u's are in eurytherm. The model tries to spell it out, and it gets the spelling wrong. [[circle '|e|,|y|,|u|,|r|,|e|,|r|,|m|,|e|,|r|']] It writes e, y, u, r, and so on. It roughly knows which letters are in there, but not in the right order, because remember, it never actually sees the letters. [[circle '|3|:|u| hit|!| count|=|1|']] Then it counts the u's in its own misspelled version, and it gets one, which happens to be right. [[circle '<|python_start|>|'"'"'|e|ury|ther|m|'"'"'.|count|('"'"'|u|'"'"')|<|python_end|>']] And then it writes the python call, and in the python call it copies the word exactly, because copying a token is easy. [[note '<|output_start|>|1|<|output_end|>' 'forced in by the engine']] Then the engine runs the code and forces in output start, one, output end, and those are the only three red tokens in the whole response. [[circle '|####| 1']] And Python says one, and the model reports one. So the tool is robust to the model's own sloppiness. Copying the word into python is a lot easier than spelling it.
+[[underline "answer 1 | 154 tokens, 3 forced in by the tool"]] Every sample has three forced tokens, output start, the result, and output end, [[circle "172 tokens"]] and they come out with different lengths, because we sampled with a temperature.
+
+> **Exercise:** Add the three KV cache changes to your own GPT from the GPT-2 video, and check that your cached sampling gives exactly the same tokens as naive sampling. Then make the cache faster: instead of concatenating tensors every step, allocate the whole cache up front and write into it.
 
 ## Evaluation
 
-Okay so we have a model that seems to work, but "seems to work" is not good enough. We need numbers. [[open chat_eval.py 'def run_categorical_eval']] And so in nanochat there's a chat_eval script, and there are basically two kinds of evaluations.
+Okay, so we have a model that seems to work. But "seems to work" is not good enough, we need numbers. And there are two kinds of evaluation in nanochat.
 
-The first kind is categorical, which is for multiple choice. And here's a neat thing. We don't actually have to sample anything. We render the question, prime the assistant, [[circle 'logits = model(torch.tensor([ids], device=device))[0, -1]']] run a single forward pass, and then we look at the logits at the very last position, [[circle 'letter_ids = [tokenizer.encode(letter)[0] for letter in conversation["letters"]]']] but only at the logits of the allowed letters, A, B, C and D. [[circle 'logits[letter_ids].argmax().item()']] And whichever one is highest, that's the model's answer.
+The first is multiple choice, like MMLU. And here's a neat thing: we don't even have to sample. We render the question, prime the assistant, and run one forward pass. Then we look at the logits at the last position, which is the model's prediction for the first token of its answer, but only at the logits of the allowed letters, A, B, C and D. Whichever is biggest, that's the answer. Let's write it, and compare the base model and our SFT model on 100 questions.
 
-```python from=chat_eval.py start="def run_categorical_eval" end="def run_generative_eval" exec=0
+```python
+@torch.no_grad()
+def multiple_choice_accuracy(model, task, n):
+    correct = 0
+    for i in range(n):
+        conversation = task[i]
+        ids = tokenizer.render_for_completion(conversation)
+        logits = model(torch.tensor([ids]))[0, -1] # the logits for the assistant's first token
+        letter_ids = [tokenizer.encode(letter)[0] for letter in conversation["letters"]]
+        predicted = conversation["letters"][logits[letter_ids].argmax().item()]
+        correct += predicted == conversation["messages"][-1]["content"]
+    return correct / n
+
+mmlu_test = MMLU("test")
+print(f"base: {multiple_choice_accuracy(model, mmlu_test, 100):.2f}, sft: {multiple_choice_accuracy(sft_model, mmlu_test, 100):.2f}")
 ```
 
-[[note 'logits[letter_ids].argmax().item()' 'forced to pick a letter']] So this is kind of generous to the model, because even if it would have said something else, we're forcing it to pick one of the letters. But that's how these evaluations are typically done, and it makes them fast and low-noise. And the random baseline for four choices is 25 percent.
+[[circle "logits = model(torch.tensor([ids]))[0, -1] # the logits for the assistant's first token"]] One forward pass, the logits at the last position, [[circle "letter_ids = [tokenizer.encode(letter)[0] for letter in conversation[\"letters\"]]"]] restricted to the letters. [[circle "base: 0.29, sft: 0.26"]] And both are about 25 percent, which is exactly random guessing for four choices. And with only 100 questions, the noise on these numbers is about plus or minus five percent, so 29 versus 26 is not a real difference. Now this is important to understand. GPT-2 small simply doesn't know the answers to these questions. SFT can teach a format, but it can't teach knowledge that isn't there. For MMLU to move, you need a much stronger pretrained model, which is a big part of why nanochat trains its own base models.
 
-[[open chat_eval.py 'def run_generative_eval']] The second kind is generative, for things like GSM8K and SpellingBee. [[circle 'results, _ = engine.generate_batch(']] Here we actually sample a response, [[open tasks.py 'ANSWER_RE = re.compile']] then extract the number after the four hash signs, and compare it to the reference answer.
+The second kind is generative. We sample an answer, pull out the number after the hash signs, and compare. Let's do 20 SpellingBee questions the model has never seen.
 
-```python from=chat_eval.py start="def run_generative_eval" end="TASKS = {" exec=0
+```python
+bee_test = SpellingBee(size=20, split="test")
+correct = 0
+for i in range(20):
+    conversation = bee_test[i]
+    ids = tokenizer.render_for_completion(conversation)
+    out, _ = sft_engine.generate_batch(ids, max_tokens=256, temperature=0.0)
+    correct += bee_test.evaluate(conversation, tokenizer.decode(out[0][len(ids):]))
+print(f"SpellingBee: {correct}/20")
 ```
 
-And then to get one number, nanochat has something called ChatCORE. [[open chat_eval.py '# ChatCORE: accuracy re-scaled']] It takes the accuracy on every task, [[circle '(results[t] - BASELINES[t]) / (1 - BASELINES[t])']] rescales it so that zero means random guessing and one means perfect, and then averages them. So let's evaluate both the base model and our SFT model on 100 problems of each task. For the base model, I'm going to use the same chat format, which it has never seen, so we expect it to be pretty bad.
+[[circle "SpellingBee: 9/20"]] Nine out of twenty. So about half. That's a narrow, procedural task, and SFT taught the model a procedure that it can actually execute, most of the time. [[open chat_eval.py "def run_categorical_eval"]] In the repo, chat_eval.py has both of these, [[open chat_eval.py "# ChatCORE: accuracy re-scaled"]] plus something nanochat calls ChatCORE: [[circle "(results[t] - BASELINES[t]) / (1 - BASELINES[t])"]] every accuracy is rescaled so that zero means random guessing and one means perfect, and then averaged into one number. Here's what I got on 100 problems of every task.
 
 ```bash
 python chat_eval.py -i base -x 100
@@ -512,9 +827,9 @@ SpellingBee: 53.00%
 ChatCORE: 0.1087
 ```
 
-Okay so let's be honest about these numbers, because this is exactly where evaluations earn their keep. [[circle 'MMLU: 29.00%']] On the multiple choice tasks, both models are basically at chance, 25 percent. And with only 100 problems, the noise on each of these numbers is something like plus or minus four or five percent, [[circle 'ARC-Easy: 24.00%']] so 24 versus 29 is not a real difference. GPT-2 small simply doesn't have the knowledge to answer MMLU questions, and SFT can't add knowledge that isn't there, it can only teach the format. You need a much bigger and better pretrained model for these to move, which is a big part of why nanochat pretrains its own, much stronger base models. [[circle 'GSM8K: 0.00%']] GSM8K is zero for both. The SFT model has learned the format of a math solution, with calculator calls and the four hash signs at the end, but it can't actually do the reasoning. [[circle 'SpellingBee: 53.00%']] But SpellingBee goes from zero to 53 percent. That's a narrow, procedural task, and SFT taught the model a procedure, spell, count, double check with python, that it can actually execute. [[circle 'ChatCORE: 0.0240']] So the ChatCORE goes from 0.02 [[circle 'ChatCORE: 0.1087']] to 0.11, and essentially all of that comes from SpellingBee. And 53 percent is not great, but it's also not zero, which is exactly where we want to be for the next stage.
+[[circle "MMLU: 26.00%"]] Multiple choice is at chance for both, as we saw. [[circle "GSM8K: 0.00%"]] GSM8K is zero for both: the SFT model learned what a math solution looks like, with tool calls and hash signs, but it can't do the reasoning. [[circle "SpellingBee: 53.00%"]] And SpellingBee goes from zero to 53 percent. [[circle "ChatCORE: 0.1087"]] So the ChatCORE goes from 0.02 to 0.11, and almost all of that is SpellingBee. And 53 percent is not great, but it's not zero either, and that's exactly where we want to be for the next stage.
 
-> **Exercise:** Try evaluating the base model on MMLU with a few-shot prompt instead of the chat format. How close can you get to the SFT model just by prompting?
+> **Exercise:** Evaluate the base model on MMLU with a few-shot prompt, using plain text instead of our chat format. How close can you get to the SFT model just by prompting?
 
 ## Reinforcement learning
 
@@ -525,8 +840,8 @@ Okay so let's be honest about these numbers, because this is exactly where evalu
 @group fill 390 130 150 70 green "R = 1" 30
 @group fill 555 130 150 70 green "R = 1" 30
 @group fill 720 130 150 70 red "R = 0" 30
-@group fill 885 130 150 70 red "R = 0" 30
-@group fill 1050 130 150 70 green "R = 1" 30
+@group fill 885 130 150 70 green "R = 1" 30
+@group fill 1050 130 150 70 red "R = 0" 30
 @group fill 1215 130 150 70 red "R = 0" 30
 @mean line 50 240 1380 240 gray
 @mean text 40 255 "mean reward = 0.5" 34 gray
@@ -535,8 +850,8 @@ Okay so let's be honest about these numbers, because this is exactly where evalu
 @adv text 425 320 "+0.5" 40 green
 @adv text 590 320 "+0.5" 40 green
 @adv text 755 320 "-0.5" 40 red
-@adv text 920 320 "-0.5" 40 red
-@adv text 1085 320 "+0.5" 40 green
+@adv text 920 320 "+0.5" 40 green
+@adv text 1085 320 "-0.5" 40 red
 @adv text 1250 320 "-0.5" 40 red
 @up text 40 420 "advantage > 0: push those tokens up (like SFT on them)" 36 green
 @down text 40 480 "advantage < 0: push those tokens down" 36 red
@@ -544,19 +859,17 @@ Okay so let's be honest about these numbers, because this is exactly where evalu
 @zero text 40 660 "all right, or all wrong → every advantage is 0 → nothing to learn" 36 orange
 ```
 
-Okay, so now we get to the last stage, and I think the most exciting one. Reinforcement learning.
+Okay, and now the last stage, and I think the most exciting one. Why do we need it? Karpathy has a great analogy. Think of a textbook. [[write "exposition = pretraining"]] Most of it is exposition, background knowledge. That's pretraining. [[write "worked examples = SFT (imitate)"]] Then there are worked examples, where an expert solves a problem step by step, and you imitate them. That's SFT. [[write "practice problems = RL (try, check the answer)"]] And at the end of every chapter, there are practice problems, with the final answer in the back of the book but no solution. You try, you fail, you try again, and you figure out what works for you. That's reinforcement learning.
 
-So first, why do we need it? Karpathy has a really nice analogy for this. Think about how you learn from a textbook. [[write 'exposition = pretraining']] Most of the textbook is exposition, background knowledge, and that's like pretraining. [[write 'worked examples = SFT (imitate)']] Then there are worked examples, where an expert shows you how to solve a problem step by step, and you imitate them. And that's SFT. [[write 'practice problems = RL (try, check the answer)']] But then at the end of every chapter, there are practice problems. You're given the problem, and the final answer is in the back of the book, but not the solution. And you have to try, and fail, and try again, and figure out what works for you. And that's reinforcement learning.
+And here's the deep reason why this matters. [[write "a human's solution ≠ the best one for the model"]] With SFT, we make the model imitate a solution that some person, or some other model, wrote. But that author has a very different brain. A step that's trivial for them might be a leap that our little model can't make in one token. And a step they wrote out carefully might be obvious to our model. We don't actually know the best sequence of tokens for this particular model. [[write "→ let the model try, and do more of what works"]] So the idea of RL is: don't tell it. Let it try many times, and whatever works, do more of that.
 
-And here's the deep reason why this matters. When we do SFT on a GSM8K solution, we're asking the model to imitate a human's solution. [[write 'a human'"'"'s solution ≠ the best one for the model']] But the human has a very different brain from the model. Some step that's trivial for the human might be a huge leap for the model, a leap that it can't make in a single token, and some step that the human spells out carefully might be totally obvious to the model. We don't actually know what the best token sequence is for this particular model to get to the right answer. And so the idea of reinforcement learning is, let's not tell it. [[write '→ let the model try, do more of what works']] Let the model try many times, and whatever works, do more of that.
+So let's make that precise. [[erase]] [[write "question → sample answer y → reward R (1 if correct, else 0)"]] We have a question, the model samples an answer y, and we check it with our grader and get a reward R, one if it's correct and zero if not. [[write "goal: maximize E[ R ] over the answers the model samples"]] And we want to maximize the expected reward, the average reward of the answers the model would sample. Now how do we get a gradient of an average over samples? Here's the trick, and it's worth deriving once. [[write "grad E[R] = sum over y of R(y) * grad p(y)"]] The expected reward is a sum over all possible answers of the probability of the answer times its reward, so its gradient is the sum of the reward times the gradient of the probability. [[write "grad p = p * grad log p"]] Now the gradient of p is the same thing as p times the gradient of log p, that's just the chain rule backwards. [[write "→ grad E[R] = E[ R * grad log p(y) ]"]] And plugging that in, we get an expectation again! The average, over sampled answers, of the reward times the gradient of the log probability. And an expectation we can estimate by sampling. [[write "log p(y) = sum of log p(token) = -(our loss)"]] And the log probability of an answer is the sum of the log probabilities of its tokens, which is just minus the loss our model already computes.
 
-So how do we actually do that? [[erase]] [[write 'sample an answer y, reward R = 1 if correct, else 0']] Let's say we have a question, and the model samples an answer y, and then we check the answer and give it a reward R, one if it's correct and zero if it's wrong. [[write 'maximize  E[ R ]']] And what we want is to maximize the expected reward, the average reward over all the answers that the model might sample. Now, it turns out there's a really neat trick for computing the gradient of that. [[write 'grad E[R] = E[ R * grad log p(y) ]']] The gradient of the expected reward is equal to the expected value of the reward times the gradient of the log probability of the sample. This is called the policy gradient, or the REINFORCE trick, [[write '(because grad p = p * grad log p)']] and it comes from the fact that the gradient of p is equal to p times the gradient of log p. [[write 'log p(y) = sum of log p(token) = -loss']] And the log probability of a whole answer is just the sum of the log probabilities of its tokens, which is exactly the negative of the loss that our model already computes.
+So in code, it's almost embarrassingly simple. Sample some answers, and for each one, take the log probability of its tokens, multiply by its reward, and do gradient ascent on that. [[write "≈ SFT on your own samples, weighted by R"]] If you squint, it's just SFT on your own samples, weighted by how good they were. This is called the policy gradient, or REINFORCE.
 
-So in code, it's almost embarrassingly simple. Sample a bunch of answers. For each one, compute the sum of the log probabilities of its tokens, multiply by its reward, and do gradient ascent on that. [[write '≈ SFT on your own samples, weighted by R']] And if you squint at it, it's basically SFT on your own samples, weighted by how good they were.
+But there's one problem. If rewards are zero or one, the wrong answers get a weight of zero, so they're simply ignored. And on easy questions, where every answer is right, everything gets pushed up, even though there's nothing to learn. [[erase]] So what we do is subtract a baseline. [[draw group]] For every question, we sample a group of answers, say eight of them, [[draw mean]] and the advantage of each answer is its reward minus the mean reward of the group. [[draw adv]] So an answer that's better than average for this question has a positive advantage, [[draw up]] and its probability gets pushed up. [[draw down]] An answer that's worse than average gets pushed down. And you can show that subtracting a baseline doesn't change the expected gradient at all, it just makes it a lot less noisy. [[draw grpo]] This is the group in GRPO, group relative policy optimization.
 
-But there's one problem. If the rewards are zero or one, then the wrong answers get a weight of zero, so they're just ignored, and every right answer gets pushed up, even on easy questions where all the answers were right. [[erase]] So what we do is we subtract a baseline. [[draw group]] For every question, we sample a group of answers, say sixteen of them, [[draw mean]] and the advantage of each answer is its reward minus the mean reward of the group. [[draw adv]] So if an answer is better than average for this question, [[draw up]] its probability gets pushed up. [[draw down]] If it's worse than average, its probability gets pushed down. And you can show that subtracting a baseline like this doesn't change the expected gradient at all, it just makes it a lot less noisy. [[draw grpo]] This is the "group" in GRPO, group relative policy optimization.
-
-Before we do this on a transformer, let's build some intuition on the tiniest possible example. Imagine a "language model" that only ever produces a single token, out of four options, and only option two is correct. The model is just four logits. We sample a group of sixteen attempts, reward the correct ones, compute the advantages, and do the policy gradient update.
+Before we do this on a transformer, let's build intuition on the tiniest possible example. Imagine a language model that produces a single token, out of four options, and only option two is correct. The whole model is four logits. We sample a group of sixteen attempts, reward the correct ones, compute advantages, and take a gradient step.
 
 ```python
 def reinforce_toy(logits, steps=40):
@@ -578,40 +891,51 @@ def reinforce_toy(logits, steps=40):
 reinforce_toy([0.0, 0.0, 0.0, 0.0])
 ```
 
-[[circle 'p(correct) 0.2500']] So the probability of the correct answer starts at a quarter, because the logits are all zero, [[circle 'p(correct) 0.8508']] and after only ten steps it's already at 85 percent, [[circle 'p(correct) 0.9801']] and it keeps climbing towards one. Nobody ever told it the answer. It just tried things, and did more of what worked. Now watch what happens if the model starts out really bad at this, if the correct answer is very unlikely to begin with.
+[[circle "p(correct) 0.2500"]] The probability of the correct answer starts at a quarter, because all logits are zero, [[circle "p(correct) 0.8508"]] after ten steps it's at 85 percent, [[circle "p(correct) 0.9801"]] and it keeps climbing towards one. Nobody ever told it the answer. It just tried things and did more of what worked. Now what if the model starts out really bad, and the correct answer is very unlikely?
 
 ```python
 reinforce_toy([0.0, 0.0, -10.0, 0.0])
 ```
 
-[[circle 'p(correct) 0.0000 | mean reward 0.000']] Nothing happens. The correct answer is never sampled, so the reward is always zero, [[note 'p(correct) 0.0000 | mean reward 0.000' 'never sampled = no signal']] so all the advantages are zero, and there's no gradient at all. And this is a really important lesson about RL: it can only amplify behaviors that the model already does at least sometimes. It can't conjure up something from nothing. That's why we do SFT first, to get the model into a regime where it sometimes succeeds, and then RL takes it from there.
+[[circle "p(correct) 0.0000 | mean reward 0.000"]] Nothing happens. The correct answer is never sampled, so the reward is always zero, [[note "p(correct) 0.0000 | mean reward 0.000" "never sampled = no signal"]] so every advantage is zero, and there's no gradient. And this is the most important lesson about RL: it can only amplify things the model already does sometimes. It can't create a behavior from nothing. That's why we do SFT first, to get into a regime where the model sometimes succeeds. [[board]] [[draw zero]] And the same is true at the other end: if all eight answers are right, every advantage is zero too. RL only learns from questions at the edge of the model's ability.
 
-> **Exercise:** Pause here and try to write the loss yourself. You have the inputs and targets of a batch of sixteen sampled answers, the targets are minus one wherever we shouldn't train, and you have a tensor of sixteen advantages. Our model can return the per-token loss if you pass loss_reduction equals none.
+Okay, now the real thing, on our SFT model. Step one, rollouts. We take a SpellingBee question, render it for completion, and use our engine to sample a group of eight answers, at temperature one, because we want variety. Then we grade each one.
 
-Okay, let's look at the code. [[open chat_rl.py 'def get_batch():']] First, the rollouts.
-
-```python from=chat_rl.py start="def get_batch" end="def evaluate" exec=0
+```python
+train_bee = SpellingBee(size=1000, split="train")
+conversation = train_bee[6]
+prompt = tokenizer.render_for_completion(conversation)
+sequences, masks = sft_engine.generate_batch(prompt, num_samples=8, max_tokens=256, temperature=1.0, top_k=50, seed=0)
+rewards = [train_bee.reward(conversation, tokenizer.decode(seq[len(prompt):])) for seq in sequences]
+print(conversation["messages"][0]["content"])
+print(rewards)
 ```
 
-[[point 'prompt = tokenizer.render_for_completion(conversation)']] So for every question, we render the prompt [[circle 'engine.generate_batch(prompt, num_samples=args.num_samples']] and use the engine to sample a whole group of answers in parallel, at temperature one, because we want diversity. [[circle 'rewards = [train_task.reward(']] We decode each one and get its reward from the task, and for SpellingBee and GSM8K that's just whether the answer after the hash signs is correct. Then we build inputs and targets exactly like in SFT, [[circle 'targets[mask[:, 1:] == 0] = -1']] and here's where the engine's mask comes in: we set the targets to minus one for the prompt, for the padding, and for the tool outputs that were forced into the sequence. We only train on the tokens that the model actually chose. [[circle 'advantages = rewards - rewards.mean()']] And then the advantages are the rewards minus their mean.
+[[point "What is the count of 'o' in spook?"]] How many o's in spook. [[circle "[1.0, 0.0, 1.0, 1.0, 0.0, 1.0, 0.0, 0.0]"]] Four right, four wrong. That's a question right at the edge, perfect for learning. Now step two, the policy gradient. We pad the samples to the same length, and build inputs and targets exactly like in SFT. And here's where the mask from the engine comes in: we set the targets to minus one for the prompt, for the padding, and for the tokens that the tool forced in. We only train on the tokens that the model actually chose. Then advantages, the log probabilities, and the loss.
 
-And here's the training step.
-
-```python from=chat_rl.py start="    for _ in range(args.examples_per_step):" end="    lr = args.lr" exec=0
+```python
+max_length = max(len(seq) for seq in sequences)
+pad = tokenizer.encode_special("<|assistant_end|>")
+ids = torch.tensor([seq + [pad] * (max_length - len(seq)) for seq in sequences])
+mask = torch.tensor([m + [0] * (max_length - len(m)) for m in masks])
+inputs, targets = ids[:, :-1], ids[:, 1:].clone()
+targets[mask[:, 1:] == 0] = -1 # not the prompt, not the tool outputs, not the padding
+rewards = torch.tensor(rewards)
+advantages = rewards - rewards.mean()
+print(advantages)
+logp = -sft_model(inputs, targets, loss_reduction='none').view_as(inputs) # (8, T), 0 where target is -1
+print((logp.sum(dim=1) / (targets >= 0).sum(dim=1)).tolist())
+loss = -(logp * advantages.unsqueeze(-1)).sum() / (targets >= 0).sum()
+loss.backward()
+print(loss.item())
+sft_model.zero_grad(set_to_none=True)
 ```
 
-[[circle 'logp = -model(inputs, targets, loss_reduction='"'"'none'"'"').view_as(inputs)']] So the model gives us the per-token loss, which is the negative log probability, so we negate it to get the log probabilities, and the ignored tokens have a log probability of exactly zero. [[circle 'pg_obj = (logp * advantages.unsqueeze(-1)).sum()']] We multiply each token's log probability by the advantage of the answer it belongs to, sum it all up, [[circle 'num_valid = (targets >= 0).sum().clamp(min=1)']] and normalize by the number of valid tokens. [[circle 'loss = -pg_obj / (num_valid * args.examples_per_step)']] And then the loss is the negative of that objective, because PyTorch minimizes and we want to maximize. And that's it. [[note 'loss.backward()' 'that'"'"'s it!']] That's the whole algorithm.
+[[circle 'targets[mask[:, 1:] == 0] = -1 # not the prompt, not the tool outputs, not the padding']] There's the mask. [[circle "tensor([ 0.5000, -0.5000,  0.5000,  0.5000, -0.5000,  0.5000, -0.5000, -0.5000])"]] The advantages are plus or minus a half, exactly like on the whiteboard. [[circle "logp = -sft_model(inputs, targets, loss_reduction='none').view_as(inputs) # (8, T), 0 where target is -1"]] The model gives us the loss of every token, the negative log probability, so we negate it, and the ignored tokens come out as exactly zero. [[underline "[-0.23993052542209625, -0.05462498217821121"]] And here's the average log probability of each answer. [[circle "-0.600749135017395"]] The fifth answer, a wrong one, has a much lower log probability per token than the others, it's a bit of an unusual sample for this model. [[circle "loss = -(logp * advantages.unsqueeze(-1)).sum() / (targets >= 0).sum()"]] Then the loss: every token's log probability times the advantage of its answer, summed, divided by the number of trained tokens, and with a minus sign, because PyTorch minimizes and we want to maximize. And then backward, and an optimizer step. That's the whole algorithm.
 
-Now, if you've read about GRPO or PPO, you might be wondering where all the other stuff is. [[open chat_rl.py 'I put "GRPO" in quotes']] And nanochat makes four deliberate simplifications, and they're written right at the top of the file.
+[[open chat_rl.py "I put \"GRPO\" in quotes"]] Now if you've read about GRPO or PPO, you may wonder where everything else is. And nanochat makes four deliberate simplifications, written right at the top of the file. [[circle "1) no KL regularization to a reference model (no trust region)"]] Number one, there's no KL penalty to the SFT model. That's a regularizer that keeps the model from drifting too far, and for a short run like ours it's not needed. [[circle "2) we are fully on-policy"]] Number two, no PPO ratio and clipping. Those exist because PPO takes several gradient steps on the same batch of samples, so the samples go stale and you have to correct for that. We take exactly one step per batch, so we're always on-policy, and the ratio would always be exactly one. [[circle "3) token-level normalization of the loss (DAPO style)"]] Number three, we divide by the total number of tokens, not per answer, as the DAPO paper suggests, so long answers aren't down-weighted. [[circle "4) the advantage is just (reward - mean reward of the group)"]] And number four, we don't divide the advantage by the standard deviation. Put it all together, and what's left is good old REINFORCE, with a group mean baseline.
 
-```python from=chat_rl.py start="I put" end="GPU:" exec=0
-```
-
-[[circle '1) no KL regularization to a reference model (no trust region)']] Number one, there's no KL penalty to a reference model. That's a regularizer that keeps the model from drifting too far from the SFT model, and in practice, for a short run like this, it's not really needed. [[circle '2) we are fully on-policy']] Number two, there's no PPO ratio and clipping. Those exist because in PPO you take multiple gradient steps on the same batch of samples, so the samples become stale, off-policy, and you need to correct for that. But we take exactly one gradient step per batch, so we are always on-policy, and the ratio would always be exactly one. [[circle '3) token-level normalization of the loss (DAPO style)']] Number three, we normalize by the total number of tokens, not per answer, which is what the DAPO paper recommends, so that long answers aren't down-weighted. [[circle '4) the advantage is just (reward - mean reward of the group)']] And number four, the advantage is just the reward minus the mean, we don't divide by the standard deviation. Put all of that together and what you're left with is honestly just good old REINFORCE, with a group mean baseline.
-
-One more thing to notice. If all sixteen answers to a question are correct, or all of them are wrong, [[draw zero]] then all the advantages are zero, and that question contributes no gradient at all. So RL only learns from questions that are at the edge of the model's ability, where it sometimes succeeds and sometimes fails. If your model can never solve a problem, RL can't help you, and that's why we do SFT first.
-
-Okay, so let's run it. We start from our SFT model, which gets about half of the SpellingBee questions right, so it's right at the edge of its ability, which is exactly where RL can help. On a GPU you'd use the defaults, sixteen questions per step and sixteen samples per question. [[open chat_rl.py 'CPU (a quick demo):']] On my CPU, I'm going to do 40 steps, with eight questions per step and eight samples each, so 64 attempts per step, and every ten steps we evaluate on 48 held-out questions, with eight samples each. This took about three hours, most of it spent sampling.
+[[open chat_rl.py "def get_batch():"]] And chat_rl.py is exactly the two cells we just wrote, [[circle "advantages = rewards - rewards.mean()"]] the rollouts, [[open chat_rl.py "pg_obj = (logp * advantages.unsqueeze(-1)).sum()"]] and the loss, [[open chat_rl.py "def evaluate(num_samples=8):"]] plus an evaluation on held out questions every few steps. On a GPU you'd use sixteen questions per step and sixteen samples each. [[open chat_rl.py "CPU (a quick demo):"]] On my CPU, I did 40 steps of eight questions with eight samples each, which took about three hours, most of it sampling.
 
 ```bash
 python chat_rl.py --task=SpellingBee --num-steps=40 --examples-per-step=8 --num-samples=8 --eval-examples=48 --lr=3e-5
@@ -639,13 +963,11 @@ step   40 | eval pass@1 0.8750 | pass@8 1.0000
 Saved the RL model to /root/.cache/nanochat-posttrain/chatrl.pt
 ```
 
-So look at the eval. [[circle 'eval pass@1 0.4427']] Before RL, pass at one is 44 percent. That's the fraction of individual samples, at temperature one, that are correct. [[circle 'pass@8 0.9167']] But pass at eight is 92 percent: if we let the model try eight times, then for 92 percent of the questions at least one of the attempts is right. So the model already "knows" how to solve almost all of these, it's just unreliable. [[circle 'eval pass@1 0.8385']] And then after only ten steps of RL, pass at one shoots up to 84 percent, [[circle 'eval pass@1 0.8750']] and by the end it's at 87 and a half. [[circle 'pass@8 1.0000']] And pass at eight goes to 100 percent. This is a really common pattern with RL on language models. A lot of what it does is take the things the model can do some of the time, and make it do them most of the time. [[note 'eval pass@1 0.8750' 'pass@k → pass@1']] It converts pass at k into pass at one.
+So let's read this. [[circle "eval pass@1 0.4427"]] Pass at one is the fraction of single samples that are correct, and before RL, it's 44 percent. [[circle "pass@8 0.9167"]] Pass at eight is the fraction of questions where at least one of eight samples is correct, and it's 92 percent. So the model can already solve almost every question, it's just unreliable. [[circle "eval pass@1 0.8385"]] And after only ten steps of RL, pass at one jumps to 84 percent, [[circle "eval pass@1 0.8750"]] and ends at 87 and a half. [[note "eval pass@1 0.8750" "pass@k → pass@1"]] This is a really common pattern. RL takes what the model can do some of the time, and makes it do it most of the time. It turns pass at k into pass at one.
 
-The training reward on the other hand is really noisy, [[circle 'reward 0.3438']] look at step 26, where it dips to 0.34. That's because every step only has eight questions, so some steps just happen to get harder words. Always look at a held out evaluation, not the training reward. And one more fun thing: the number of sampled tokens per answer [[circle 'sampled tokens per answer 214.7']] goes from around 210 [[circle 'sampled tokens per answer 158.6']] down to about 155. Nobody asked the model to be shorter. But a lot of the long answers were ones where it got lost, misspelling a word into a long garbage sequence of letters and never getting back on track, and those tend to get a reward of zero, so RL pushes them down.
+[[circle "reward 0.3438"]] And the training reward is really noisy, look at step 26. That's because every step only has eight questions, and some steps just get harder words. Always trust a held out evaluation, not the training reward. [[circle "sampled tokens per answer 214.7"]] And one more fun thing. The answers get shorter, from about 210 tokens [[circle "sampled tokens per answer 158.6"]] to about 155. Nobody asked for that. But many long answers were ones where the model got lost, misspelling a word into a long string of garbage letters, and those got zero reward, so RL pushed them down. And with greedy decoding on 100 test questions, SpellingBee goes from 53 percent after SFT to 86 percent after RL.
 
-And if we use our eval script, with greedy decoding on 100 test questions, SpellingBee goes from 53 percent for the SFT model to 86 percent after RL.
-
-And now, finally, let's ask it the famous question. I'll take eight samples from both the SFT model and the RL model, and print their final answers.
+So now, finally, the famous question. Eight samples from the SFT model and from the RL model, and their final answers.
 
 ```python
 from tasks import extract_answer
@@ -658,13 +980,11 @@ def answers(question, engine):
     return [extract_answer(tokenizer.decode(o[len(ids):])) for o in out]
 
 for question in ["How many r are in the word 'strawberry'?", "How many e are in cheese?", "How many r are in strawberry?"]:
-    for name, engine in [("sft", sft_engine), ("rl", rl_engine)]:
-        print(f"{name:3s} | {question:42s} | {answers(question, engine)}")
+    for name, engine_ in [("sft", sft_engine), ("rl", rl_engine)]:
+        print(f"{name:3s} | {question:42s} | {answers(question, engine_)}")
 ```
 
-Okay, so look at the first one. [[circle '['"'"'1'"'"', '"'"'3'"'"', '"'"'2'"'"', '"'"'2'"'"', '"'"'2'"'"', '"'"'2'"'"', '"'"'2'"'"', '"'"'1'"'"']']] The SFT model gets three r's in strawberry only once out of eight tries, [[circle '['"'"'3'"'"', '"'"'3'"'"', '"'"'3'"'"', '"'"'3'"'"', '"'"'3'"'"', '"'"'3'"'"', '"'"'3'"'"', '"'"'3'"'"']']] and the RL model gets it right eight out of eight times. [[circle 'How many e are in cheese?']] Same thing for cheese, two out of eight before, eight out of eight after. That's RL.
-
-[[circle 'How many r are in strawberry?']] But now look at the last one. "How many r are in strawberry", without the quotes and without "the word". [[circle '['"'"'4'"'"', '"'"'2'"'"', '"'"'3'"'"', '"'"'3'"'"', '"'"'1'"'"', '"'"'2'"'"', '"'"'2'"'"', '"'"'1'"'"']']] And both models fall apart, the answers are all over the place. What's going on? Let's look at what the RL model actually writes.
+[[circle "['1', '3', '2', '2', '2', '2', '2', '1']"]] Before RL, three r's in strawberry only once out of eight. [[circle "['3', '3', '3', '3', '3', '3', '3', '3']"]] After RL, eight out of eight. [[circle "How many e are in cheese?"]] Same for cheese. That's RL. [[circle "How many r are in strawberry?"]] But look at the last question, without the quotes and without "the word". [[circle "['4', '2', '3', '3', '1', '2', '2', '1']"]] Both models fall apart. What's going on? Let's look.
 
 ```python
 print(chat("How many r are in strawberry?", engine=rl_engine, max_tokens=40))
@@ -672,17 +992,15 @@ print([tokenizer.decode([t]) for t in tokenizer.encode("How many r are in strawb
 print([tokenizer.decode([t]) for t in tokenizer.encode("How many r are in the word 'strawberry'?")])
 ```
 
-It says, we are asked to find the number r in the word "sweet". [[circle ''"'"'sweet'"'"'']] Sweet! It didn't even copy the right word. And the tokenization tells you exactly why. [[circle ''"'"' strawberry'"'"'']] In the first version, the word is "space strawberry", a single token, one integer. [[circle ''"'"'st'"'"', '"'"'raw'"'"', '"'"'berry'"'"'']] In the version with quotes, it's "st", "raw", "berry", exactly the same tokens that the model has to write inside its quotes and in the python call. So in the quoted version, the model just has to copy three tokens, which is easy. But in the unquoted version, it has to know that the single token "space strawberry" is spelled s, t, r, a, w, and so on, and write it out as a completely different set of tokens. And it doesn't know that. So it reaches for something that's nearby in meaning, "sweet". Our SpellingBee training data mostly has rare words, which get split into several tokens either way, so the model never really had to learn how to unpack a single common token. And this is the tokenizer biting us, once again. If you remember the tokenization video, so many of the weird failures of LLMs come back to the tokenizer, and this is a perfect example.
+[[circle "'sweet'"]] It says: we are asked to find the number of r's in the word "sweet". Sweet! It didn't even copy the right word. And the tokens tell you why. [[circle "' strawberry'"]] Without quotes, the word is "space strawberry", one single token. [[circle "'st', 'raw', 'berry'"]] With quotes, it's "st", "raw", "berry", exactly the tokens the model has to write in its spelling and in the python call. So with quotes, it just has to copy three tokens. Without quotes, it has to know how one single token is spelled, and write it as a different set of tokens, and it doesn't know that, so it reaches for something nearby in meaning: sweet. Our SpellingBee data mostly has rare words, which are several tokens either way, so the model never learned to unpack a common single-token word. The tokenizer, once again. And the fix is what you'd do in practice: now that we understand the failure, add training data for exactly this case. You look at the failures, you understand them, and you go back and fix the data.
 
-So how would we fix this? Well, now that we understand the failure, we could add training data for exactly this: common words that are a single token. And that's how this stuff works in practice. You look at the failures, you figure out why they happen, and you go back and fix the data.
-
-> **Exercise:** Look at the samples during RL. Does the model start trusting python over its manual count, or the other way around? Try changing the reward, for example a small penalty for long answers, and see what the model does. Be careful, RL will find any loophole in your reward.
+> **Exercise:** Write the RL training loop yourself, using the two cells above: a loop over questions, an AdamW optimizer with a small learning rate, and an evaluation of pass@1 every ten steps. Then try changing the reward, for example a small penalty for long answers, and see what the model does. Careful: RL will find any loophole in your reward.
 
 ## Scaling up, and what's next
 
-Okay, so that's everything. Let's zoom out and recap. We took a base model, a document simulator, and we did three things. [[write '1. a chat format: special tokens + a loss mask']] We defined a format for conversations, with special tokens and a loss mask. [[write '2. SFT on a mixture: chat, MC, math + tool, spelling']] We did supervised finetuning on a mixture of conversations, where every dataset teaches something specific: chatting, multiple choice, math with a calculator, and spelling. [[write '3. RL: sample, score, push up what works']] And then we did reinforcement learning, where the model samples its own answers and we push up the ones that work. [[write '+ an engine (KV cache, tools) + evals']] Along the way we wrote an inference engine with a KV cache and tool use, and evaluations to measure everything.
+Okay, so let's zoom out. [[write "1. a chat format: special tokens + a loss mask"]] We took a base model, a document simulator, and we gave it a format for conversations, with special tokens and a loss mask. [[write "2. SFT on a mixture: chat, MC, math + tool, spelling"]] We built a mixture of data where every part teaches something specific, a packing dataloader, and we ran SFT, which is just pretraining on that data. [[write "3. an engine: KV cache + tools"]] We wrote an inference engine with a KV cache and tool use, [[write "4. evals"]] evaluations, [[write "5. RL: sample, grade, push up what works"]] and reinforcement learning with a group baseline. And you've now written every one of these pieces yourself.
 
-Now everything we wrote today maps one to one onto nanochat. [[write 'ours → nanochat: same files, same structure']] Our tokenizer is nanochat's tokenizer.py, our tasks are its tasks directory, our engine is its engine.py, and our chat_sft, chat_rl, chat_eval and chat_cli are its scripts. [[write '+ its own base model (--depth), Muon, bf16, 8 GPUs']] The real thing has a few more bells and whistles. The base model is pretrained from scratch instead of GPT-2, and you can pick its size with a single depth parameter. It uses the Muon optimizer for the matrices, it runs in bfloat16 across eight GPUs with distributed data parallel, and it warm-starts the optimizer state from pretraining. And in nanochat, RL is done on GSM8K. But the ideas are exactly the ones we built today. If you have a GPU node, the whole thing is one script.
+[[write "ours → nanochat: same files, same structure"]] And this maps one to one onto nanochat. Our tokenizer, tasks, engine, and the chat_sft, chat_rl, chat_eval and chat_cli scripts all have the same names there. [[write "+ its own base model (--depth), Muon, bf16, 8 GPUs"]] The real thing pretrains its own base model, whose size you pick with one depth parameter, it uses the Muon optimizer, bfloat16, eight GPUs with data parallel, and in nanochat, RL is done on GSM8K. But the ideas are the ones you just built. If you have a GPU node, it's one script.
 
 ```bash exec=0
 git clone https://github.com/karpathy/nanochat && cd nanochat
@@ -691,8 +1009,6 @@ torchrun --standalone --nproc_per_node=8 -m scripts.chat_rl  # reinforcement lea
 python -m scripts.chat_cli -i rl                             # talk to it
 ```
 
-[[erase]] And there's a lot that we didn't cover. [[write 'not covered:']] We only did reinforcement learning on problems where we can check the answer automatically. But what about writing a poem, or a joke? There's no answer key for that. [[write 'RLHF: a reward model trained on human preferences']] And that's where RLHF comes in, reinforcement learning from human feedback, where you train a separate reward model on human preferences, and then do RL against that reward model. [[write 'DPO: no reward model at all']] Or methods like DPO, which skip the reward model entirely. But be careful, because a reward model is itself a neural network, and if you run RL against it for too long, [[write 'careful: RL will game a learned reward']] the policy will find adversarial examples that fool it. So RLHF is a bit of a different beast from the kind of RL we did today, where the reward is the actual ground truth.
+[[erase]] [[write "not covered:"]] And there's a lot we didn't cover. We only did RL where we can check the answer automatically. But what about a poem, or a joke? There's no answer key. [[write "RLHF: a reward model trained on human preferences"]] That's where RLHF comes in, where you train a separate reward model on human preferences and do RL against it. [[write "DPO: no reward model at all"]] Or DPO, which skips the reward model. [[write "careful: RL will game a learned reward"]] But a reward model is itself a neural net, and if you run RL against it for long, the policy finds adversarial examples that fool it. [[write "reasoning models: long RL on hard math and code"]] And there's the whole world of reasoning models, where you run RL for a long time on hard math and code, and the model discovers on its own that it should think for a long time, try different approaches and check its work. Our little SpellingBee procedure is a tiny cartoon of that.
 
-[[write 'reasoning models: long RL on hard math and code']] And there's the whole world of reasoning models, where you run RL for a very long time on hard math and code problems, and the model discovers on its own that it should think for a long time, try different approaches, backtrack, and double check its work. That's really what our SpellingBee task is a tiny cartoon of.
-
-Okay, so that's it for today. I hope you enjoyed it. Take the code, run it, break it, add your own tasks, and see what your model learns. See you next time.
+Okay, so that's it for today. Take the code, run it, break it, add your own tasks, and see what your model learns. See you next time.
