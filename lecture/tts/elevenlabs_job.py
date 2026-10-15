@@ -62,9 +62,12 @@ def slug(text):
     return re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")
 
 def tts(text, model, voice, previous_text, next_text):
+    if model.startswith("eleven_v3"): # v3 doesn't take the neighbouring text as context (yet)
+        previous_text = next_text = None
     body = {"text": text, "model_id": model, "previous_text": previous_text, "next_text": next_text,
             "voice_settings": {"stability": 0.5} if model.startswith("eleven_v3") else
                               {"stability": 0.45, "similarity_boost": 0.75, "style": 0.2, "use_speaker_boost": True}}
+    body = {k: v for k, v in body.items() if v is not None}
     attempts = [body, {k: v for k, v in body.items() if k not in ("previous_text", "next_text")},
                 {k: v for k, v in body.items() if k not in ("previous_text", "next_text", "voice_settings")}]
     for attempt in range(6):
@@ -74,6 +77,8 @@ def tts(text, model, voice, previous_text, next_text):
         except urllib.error.HTTPError as e:
             detail = e.read().decode(errors="replace")[:300]
             print(f"    HTTP {e.code}: {detail}", flush=True)
+            if "quota_exceeded" in detail:
+                sys.exit("out of ElevenLabs credits: stopping (the clips made so far still get uploaded)")
             if e.code in (429, 500, 502, 503, 504):
                 time.sleep(2 ** attempt * 5)
             elif e.code != 400 and e.code != 422:
