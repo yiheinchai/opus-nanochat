@@ -26,17 +26,37 @@ def request(method, path, body=None, accept="application/json"):
     with urllib.request.urlopen(req, timeout=300) as response:
         return response.read()
 
+def try_request(what, method, path):
+    try:
+        return json.loads(request(method, path))
+    except urllib.error.HTTPError as e:
+        # ElevenLabs explains what's wrong (e.g. a missing permission on a restricted key); it never echoes the key
+        print(f"{what}: HTTP {e.code} {e.read().decode(errors='replace')[:400]}")
+        return None
+
 def list_everything():
-    sub = json.loads(request("GET", "/v1/user/subscription"))
-    print(f"subscription: tier={sub.get('tier')} characters used {sub.get('character_count')} of {sub.get('character_limit')}")
-    print("\nMODELS")
-    for m in json.loads(request("GET", "/v1/models")):
-        if m.get("can_do_text_to_speech"):
-            print(f"  {m['model_id']:32s} {m.get('name')}  (max chars/request: {m.get('maximum_text_length_per_request')})")
-    print("\nVOICES")
-    for v in json.loads(request("GET", "/v1/voices"))["voices"]:
-        labels = ", ".join(f"{k}={val}" for k, val in (v.get("labels") or {}).items())
-        print(f"  {v['voice_id']}  {v['name']:24s} {v.get('category', ''):10s} {labels}")
+    sub = try_request("subscription", "GET", "/v1/user/subscription")
+    if sub:
+        print(f"subscription: tier={sub.get('tier')} characters used {sub.get('character_count')} of {sub.get('character_limit')}")
+    models = try_request("models", "GET", "/v1/models")
+    if models:
+        print("\nMODELS")
+        for m in models:
+            if m.get("can_do_text_to_speech"):
+                print(f"  {m['model_id']:32s} {m.get('name')}  (max chars/request: {m.get('maximum_text_length_per_request')})")
+    voices = try_request("voices", "GET", "/v1/voices")
+    if voices:
+        print("\nVOICES")
+        for v in voices["voices"]:
+            labels = ", ".join(f"{k}={val}" for k, val in (v.get("labels") or {}).items())
+            print(f"  {v['voice_id']}  {v['name']:24s} {v.get('category', ''):10s} {labels}")
+    # and one tiny real request, with a stock voice, to check that text to speech itself works with this key
+    try:
+        audio = request("POST", "/v1/text-to-speech/JBFqnCBsd6RMkjVDRZzb?output_format=mp3_44100_128",
+                        {"text": "Testing.", "model_id": "eleven_multilingual_v2"}, accept="audio/mpeg")
+        print(f"\ntext to speech works: {len(audio)} bytes of audio for an 8 character test")
+    except urllib.error.HTTPError as e:
+        print(f"\ntext to speech: HTTP {e.code} {e.read().decode(errors='replace')[:400]}")
 
 def slug(text):
     return re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")
@@ -62,7 +82,8 @@ def tts(text, model, voice, previous_text, next_text):
 
 def generate(model, voice, indices, out):
     rows = [json.loads(line) for line in open(os.path.join(os.path.dirname(__file__), "manifest.jsonl"), encoding="utf-8")]
-    name = json.loads(request("GET", f"/v1/voices/{voice}")).get("name", voice)
+    info = try_request("voice", "GET", f"/v1/voices/{voice}")
+    name = info.get("name", voice) if info else voice
     folder = os.path.join(out, f"elevenlabs-{slug(model)}-{slug(name)}")
     os.makedirs(folder, exist_ok=True)
     wanted = range(len(rows)) if indices == "all" else [int(i) for i in indices.split(",")]
