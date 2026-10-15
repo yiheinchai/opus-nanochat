@@ -84,27 +84,34 @@ def sample(engine, conversation, num_samples, seed, max_tokens, temperature=1.0)
 # 1) Collect preference pairs from the model's own answers
 
 @torch.no_grad()
-def collect_pairs(engine):
-    rng = random.Random(0)
-    pairs = []
+def collect_pairs(engine, progress_path):
+    """ every question's outcome is appended to progress_path as we go, so that an interrupted run picks up where it left off """
     jobs = [("general", q) for q in ordinary_questions("train", args.general_prompts, start=100_000)]
     bee = SpellingBee(size=100_000, split="train")
     jobs += [("spelling", bee[50_000 + i]) for i in range(args.spelling_prompts)] # questions RL didn't practice on
-    rng.shuffle(jobs)
+    random.Random(0).shuffle(jobs)
+    done = [json.loads(line) for line in open(progress_path)] if os.path.exists(progress_path) else []
+    pairs = [d["pair"] for d in done if d["pair"]]
     t0 = time.time()
-    for k, (kind, conversation) in enumerate(jobs):
-        max_tokens = args.max_new_tokens_general if kind == "general" else args.max_new_tokens
-        answers = sample(engine, conversation, args.num_samples, seed=k, max_tokens=max_tokens)
-        if kind == "general": # the judge: don't run the spelling procedure when nobody asked for it
-            good = [a for a in answers if not LEAK.search(a["text"])]
-            bad = [a for a in answers if LEAK.search(a["text"])]
-        else: # the judge: the right answer
-            good = [a for a in answers if bee.evaluate(conversation, a["text"])]
-            bad = [a for a in answers if not bee.evaluate(conversation, a["text"])]
-        if good and bad:
-            pairs.append({"kind": kind, "chosen": rng.choice(good), "rejected": rng.choice(bad)})
-        if k % 20 == 0:
-            print(f"question {k:4d}/{len(jobs)} | pairs {len(pairs)} | {time.time() - t0:.0f}s", flush=True)
+    with open(progress_path, "a") as progress:
+        for k in range(len(done), len(jobs)):
+            kind, conversation = jobs[k]
+            max_tokens = args.max_new_tokens_general if kind == "general" else args.max_new_tokens
+            answers = sample(engine, conversation, args.num_samples, seed=k, max_tokens=max_tokens)
+            if kind == "general": # the judge: don't run the spelling procedure when nobody asked for it
+                good = [a for a in answers if not LEAK.search(a["text"])]
+                bad = [a for a in answers if LEAK.search(a["text"])]
+            else: # the judge: the right answer
+                good = [a for a in answers if bee.evaluate(conversation, a["text"])]
+                bad = [a for a in answers if not bee.evaluate(conversation, a["text"])]
+            rng = random.Random(k)
+            pair = {"kind": kind, "chosen": rng.choice(good), "rejected": rng.choice(bad)} if good and bad else None
+            if pair:
+                pairs.append(pair)
+            progress.write(json.dumps({"k": k, "pair": pair}) + "\n")
+            progress.flush()
+            if k % 20 == 0:
+                print(f"question {k:4d}/{len(jobs)} | pairs {len(pairs)} | {time.time() - t0:.0f}s", flush=True)
     return pairs
 
 # -----------------------------------------------------------------------------
@@ -160,7 +167,7 @@ if __name__ == "__main__":
         pairs = [json.loads(line) for line in open(pairs_path)]
         print(f"Loaded {len(pairs)} pairs from {pairs_path}")
     else:
-        pairs = collect_pairs(engine)
+        pairs = collect_pairs(engine, pairs_path + ".progress")
         with open(pairs_path, "w") as f:
             f.writelines(json.dumps(p) + "\n" for p in pairs)
         print(f"Saved {len(pairs)} pairs to {pairs_path}")
