@@ -3,7 +3,7 @@ Generates the lecture narration with ElevenLabs. Runs inside GitHub Actions (.gi
 where the API key comes from the repository secret ELEVENLABS_API_KEY. The key is never printed or saved.
 
 python lecture/tts/elevenlabs_job.py list
-python lecture/tts/elevenlabs_job.py generate --model eleven_v3 --voice <voice_id> --indices 0,70,75,93 --out lecture/tts
+python lecture/tts/elevenlabs_job.py generate --model eleven_v3 --voice <voice_id> --indices 0,70,75,93 --out narration
 """
 
 import os

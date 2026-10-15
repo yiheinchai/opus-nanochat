@@ -1,5 +1,5 @@
 # Generates the lecture narration with ElevenLabs, using the repository secret ELEVENLABS_API_KEY,
-# and commits the clips to the tts-audio branch (so the default branch stays small).
+# and uploads the clips as a workflow artifact (so no audio gets committed to the repo).
 name: tts
 
 on:
@@ -19,7 +19,7 @@ on:
         default: "0,70,75,93"
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   tts:
@@ -37,22 +37,15 @@ jobs:
         env:
           ELEVENLABS_API_KEY: ${{ secrets.ELEVENLABS_API_KEY }}
         run: python lecture/tts/elevenlabs_job.py list
-      - name: Switch to the tts-audio branch (keeping the latest manifest and script)
-        if: inputs.mode == 'generate'
-        run: |
-          cp lecture/tts/manifest.jsonl lecture/tts/elevenlabs_job.py /tmp/
-          git config user.name "tts-bot"
-          git config user.email "tts-bot@users.noreply.github.com"
-          if git ls-remote --exit-code --heads origin tts-audio; then git checkout tts-audio; else git checkout -b tts-audio; fi
-          cp /tmp/manifest.jsonl /tmp/elevenlabs_job.py lecture/tts/
       - name: Generate
         if: inputs.mode == 'generate'
         env:
           ELEVENLABS_API_KEY: ${{ secrets.ELEVENLABS_API_KEY }}
-        run: python lecture/tts/elevenlabs_job.py generate --model "${{ inputs.model }}" --voice "${{ inputs.voices }}" --indices "${{ inputs.indices }}"
-      - name: Commit the clips (also after a partial failure, so nothing is lost)
+        run: python lecture/tts/elevenlabs_job.py generate --model "${{ inputs.model }}" --voice "${{ inputs.voices }}" --indices "${{ inputs.indices }}" --out narration
+      - name: Upload the clips (also after a partial failure, so nothing is lost)
         if: always() && inputs.mode == 'generate'
-        run: |
-          git add lecture/tts
-          git commit -m "narration: ${{ inputs.model }} ${{ inputs.voices }} (${{ inputs.indices }})" || echo "nothing new"
-          git push origin tts-audio
+        uses: actions/upload-artifact@v4
+        with:
+          name: narration
+          path: narration
+          if-no-files-found: warn
