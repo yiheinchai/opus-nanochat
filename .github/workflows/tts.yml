@@ -1,0 +1,58 @@
+# Generates the lecture narration with ElevenLabs, using the repository secret ELEVENLABS_API_KEY,
+# and commits the clips to the tts-audio branch (so the default branch stays small).
+name: tts
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "list (models, voices, quota) or generate"
+        default: "list"
+      model:
+        description: "ElevenLabs model id"
+        default: "eleven_v3"
+      voices:
+        description: "voice id(s), comma separated"
+        default: ""
+      indices:
+        description: "manifest indices (comma separated) or 'all'"
+        default: "0,70,75,93"
+
+permissions:
+  contents: write
+
+jobs:
+  tts:
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: List models, voices and quota
+        if: inputs.mode == 'list'
+        env:
+          ELEVENLABS_API_KEY: ${{ secrets.ELEVENLABS_API_KEY }}
+        run: python lecture/tts/elevenlabs_job.py list
+      - name: Switch to the tts-audio branch (keeping the latest manifest and script)
+        if: inputs.mode == 'generate'
+        run: |
+          cp lecture/tts/manifest.jsonl lecture/tts/elevenlabs_job.py /tmp/
+          git config user.name "tts-bot"
+          git config user.email "tts-bot@users.noreply.github.com"
+          if git ls-remote --exit-code --heads origin tts-audio; then git checkout tts-audio; else git checkout -b tts-audio; fi
+          cp /tmp/manifest.jsonl /tmp/elevenlabs_job.py lecture/tts/
+      - name: Generate
+        if: inputs.mode == 'generate'
+        env:
+          ELEVENLABS_API_KEY: ${{ secrets.ELEVENLABS_API_KEY }}
+        run: python lecture/tts/elevenlabs_job.py generate --model "${{ inputs.model }}" --voice "${{ inputs.voices }}" --indices "${{ inputs.indices }}"
+      - name: Commit the clips (also after a partial failure, so nothing is lost)
+        if: always() && inputs.mode == 'generate'
+        run: |
+          git add lecture/tts
+          git commit -m "narration: ${{ inputs.model }} ${{ inputs.voices }} (${{ inputs.indices }})" || echo "nothing new"
+          git push origin tts-audio
