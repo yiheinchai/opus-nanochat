@@ -18,7 +18,7 @@ import urllib.error
 import urllib.request
 
 API = "https://generativelanguage.googleapis.com/v1beta"
-STYLE = "Read in a relaxed, friendly lecturer tone, conversational pace:"
+STYLE = "You are the narrator of a coding lecture. Read the text in a relaxed, friendly lecturer tone, at a conversational pace. Read only the text, exactly as written."
 
 def request(method, path, body=None):
     key = os.environ.get("GEMINI_API_KEY")
@@ -39,8 +39,9 @@ def list_models():
             print(f"  {m['name']:48s} {m.get('displayName', '')}")
 
 def tts(text, model, voice):
-    """ 24 kHz mono 16-bit PCM """
-    body = {"contents": [{"parts": [{"text": f"{STYLE}\n\n{text}"}]}],
+    """ 24 kHz mono 16-bit PCM. The style goes in the system instruction: put in the prompt, some models read it out """
+    body = {"systemInstruction": {"parts": [{"text": STYLE}]},
+            "contents": [{"parts": [{"text": text}]}],
             "generationConfig": {"responseModalities": ["AUDIO"],
                                  "speechConfig": {"voiceConfig": {"prebuiltVoiceConfig": {"voiceName": voice}}}}}
     for attempt in range(8):
@@ -51,6 +52,9 @@ def tts(text, model, voice):
         except urllib.error.HTTPError as e:
             detail = e.read().decode(errors="replace")[:300]
             print(f"    HTTP {e.code}: {detail}", flush=True)
+            if e.code == 400 and "systemInstruction" in body: # this model takes no system instruction: no style then
+                body.pop("systemInstruction")
+                continue
             if e.code not in (429, 500, 502, 503, 504):
                 raise
         except (KeyError, IndexError) as e: # no audio in the response, try again
@@ -60,7 +64,7 @@ def tts(text, model, voice):
 
 def generate(model, voice, indices, out):
     rows = [json.loads(line) for line in open(os.path.join(os.path.dirname(__file__), "manifest.jsonl"), encoding="utf-8")]
-    folder = os.path.join(out, f"gemini-{voice.lower()}")
+    folder = os.path.join(out, f"gemini-{model.replace('gemini-', '').replace('-preview', '')}-{voice.lower()}")
     os.makedirs(folder, exist_ok=True)
     wanted = range(len(rows)) if indices == "all" else [int(i) for i in indices.split(",")]
     print(f"voice {voice}, model {model} -> {folder}", flush=True)
