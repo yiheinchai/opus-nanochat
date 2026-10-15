@@ -38,7 +38,7 @@ def extract(filename, start, end=None):
     return textwrap.dedent("\n".join(lines[i0:i1])).strip("\n")
 
 def parse(path=os.path.join(HERE, "lecture.md")):
-    """ Returns a list of blocks: title | chapter | narration | exercise | code | bash | output """
+    """ Returns a list of blocks: title | chapter | narration | exercise | predict | code | bash | output | whiteboard """
     with open(path, encoding="utf-8") as f:
         text = re.sub(r"<!--.*?-->", "", f.read(), flags=re.S)
     blocks, lines, i = [], text.split("\n"), 0
@@ -79,6 +79,9 @@ def parse(path=os.path.join(HERE, "lecture.md")):
         elif line.startswith("> **Exercise:**"):
             flush()
             blocks.append({"type": "exercise", "text": line[len("> **Exercise:**"):].strip()})
+        elif line.startswith("> **Predict:**"):
+            flush()
+            blocks.append({"type": "predict", "text": line[len("> **Predict:**"):].strip()})
         elif line.strip() == "":
             flush()
         else:
@@ -112,6 +115,8 @@ def build_notebook(blocks, execute=False):
             cells.append(new_markdown_cell(strip_cues(b["text"])))
         elif b["type"] == "exercise":
             cells.append(new_markdown_cell(f"> **Exercise:** {strip_cues(b['text'])}"))
+        elif b["type"] == "predict":
+            cells.append(new_markdown_cell(f"> 🤔 **Predict, before you read on:** {strip_cues(b['text'])}"))
         elif b["type"] == "code":
             header = f"# from {b['source']}\n" if b["source"] else ""
             if b["exec"]:
@@ -136,6 +141,64 @@ def build_notebook(blocks, execute=False):
             nb.cells[i] = cell
     nbformat.write(nb, NOTEBOOK)
     print(f"wrote {NOTEBOOK}")
+
+# -----------------------------------------------------------------------------
+# The exercises notebook: lecture/exercises.md -> exercises.ipynb
+
+EXERCISES = os.path.join(HERE, "exercises.md")
+EXERCISES_NOTEBOOK = os.path.join(ROOT, "exercises.ipynb")
+
+def parse_exercises(path=EXERCISES):
+    """ Returns the intro, the setup code, and a list of exercises {title, text, stub, check, solution} """
+    intro, setup, exercises, current = [], "", [], None
+    lines = iter(open(path, encoding="utf-8").read().split("\n"))
+    in_comment = False
+    for line in lines:
+        if line.startswith("<!--"):
+            in_comment = True
+        if in_comment:
+            in_comment = "-->" not in line
+            continue
+        kind = line[3:].strip() if line.startswith("```") else None
+        if kind in ("setup", "stub", "check", "solution"):
+            code = []
+            for line in lines:
+                if line == "```":
+                    break
+                code.append(line)
+            if kind == "setup":
+                setup = "\n".join(code)
+            else:
+                current[kind] = "\n".join(code)
+        elif line.startswith("## "):
+            current = {"title": line[3:].strip(), "text": []}
+            exercises.append(current)
+        elif line.startswith("# ") and current is None:
+            title = line[2:].strip()
+        else:
+            (current["text"] if current else intro).append(line)
+    for e in exercises:
+        e["text"] = "\n".join(e["text"]).strip()
+    return title, "\n".join(intro).strip(), setup, exercises
+
+def build_exercises(verify=False):
+    import nbformat
+    from nbformat.v4 import new_notebook, new_markdown_cell, new_code_cell
+    title, intro, setup, exercises = parse_exercises()
+    if verify: # run every solution through its check, in order, in one fresh python process
+        script = setup + "\n" + "\n".join(e["solution"] + "\n" + e["check"] for e in exercises if "check" in e)
+        subprocess.run([sys.executable, "-c", script], cwd=ROOT, check=True)
+    cells = [new_markdown_cell(f"# {title}\n\n{intro}"), new_code_cell(setup)]
+    for e in exercises:
+        cells.append(new_markdown_cell(f"## {e['title']}\n\n{e['text']}"))
+        if "stub" in e:
+            cells.append(new_code_cell(e["stub"]))
+            cells.append(new_code_cell(e["check"]))
+            cells.append(new_markdown_cell(f"<details><summary><b>Solution</b> (try it yourself first!)</summary>\n\n```python\n{e['solution']}\n```\n</details>"))
+    nb = new_notebook(cells=cells)
+    nb.metadata["kernelspec"] = {"name": "python3", "display_name": "Python 3", "language": "python"}
+    nbformat.write(nb, EXERCISES_NOTEBOOK)
+    print(f"wrote {EXERCISES_NOTEBOOK} ({len(exercises)} exercises)")
 
 def notebook_outputs():
     """ code -> text output, from the executed notebook (if there is one) """
@@ -181,6 +244,16 @@ PRONUNCIATIONS = [
 
 CUE_RE = re.compile(r"\[\[(.*?)\]\] ")
 
+PREDICT_PAUSE = 4.0 # seconds of silence, with a countdown, to make your prediction
+
+def speech(b):
+    """ the text (with its cues) that gets narrated for a narration, exercise or predict block """
+    if b["type"] == "exercise":
+        return "Okay, here's an exercise for you. " + b["text"] + " Pause the video here and give it a try."
+    if b["type"] == "predict":
+        return "Pause and predict. " + b["text"]
+    return b["text"]
+
 def strip_cues(text):
     # the [[cues]] in the narration direct the screencast (see screencast.py), they are not spoken
     return CUE_RE.sub("", text)
@@ -206,12 +279,7 @@ def spoken(text):
 def narration_segments(blocks):
     """ Every piece of spoken text, in order """
     segments = []
-    for b in blocks:
-        if b["type"] == "narration":
-            segments.append(spoken(b["text"]))
-        elif b["type"] == "exercise":
-            segments.append(spoken("Okay, here's an exercise for you. " + b["text"] + " Pause the video here and give it a try."))
-    return segments
+    return [spoken(speech(b)) for b in blocks if b["type"] in ("narration", "exercise", "predict")]
 
 # text-to-speech backends: name -> (default voice, model)
 BACKENDS = {
@@ -246,9 +314,8 @@ def build_manifest(blocks):
     for b in blocks:
         if b["type"] == "chapter":
             chapter = b["text"]
-        elif b["type"] in ("narration", "exercise"):
-            text = b["text"] if b["type"] == "narration" else "Okay, here's an exercise for you. " + b["text"] + " Pause the video here and give it a try."
-            said = spoken(text)
+        elif b["type"] in ("narration", "exercise", "predict"):
+            said = spoken(speech(b))
             rows.append({"index": len(rows), "key": clip_key(said), "chapter": chapter, "kind": b["type"], "text": said})
     with open(os.path.join(out_dir, "manifest.jsonl"), "w", encoding="utf-8") as f:
         f.writelines(json.dumps(r, ensure_ascii=False) + "\n" for r in rows)
@@ -656,8 +723,9 @@ subtitles.counter = 0
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("step", choices=["notebook", "audio", "video", "all", "stats", "manifest"])
+    parser.add_argument("step", choices=["notebook", "exercises", "audio", "video", "all", "stats", "manifest"])
     parser.add_argument("--execute", action="store_true", help="execute the notebook's python cells")
+    parser.add_argument("--verify", action="store_true", help="exercises: run every solution through its check")
     parser.add_argument("--tts", choices=list(BACKENDS), default="kokoro", help="text-to-speech backend")
     parser.add_argument("--voice", default=None, help="voice for the backend (default: kokoro am_michael, ElevenLabs George)")
     parser.add_argument("--chapters", type=int, default=None, help="only the first N chapters (for a quick preview)")
@@ -675,6 +743,8 @@ if __name__ == "__main__":
         print(f"{len(segments)} segments, {words:,} words, {sum(len(s) for s in segments):,} characters, ~{words / 150:.0f} minutes")
     if args.step == "manifest":
         build_manifest(blocks)
+    if args.step in ("exercises", "all"):
+        build_exercises(verify=args.verify or args.step == "all")
     if args.step in ("notebook", "all"):
         build_notebook(blocks, execute=args.execute or args.step == "all")
     if args.step in ("audio", "all"):

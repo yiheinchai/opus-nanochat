@@ -389,20 +389,28 @@ class Lecture:
                 t += 1.5
             elif kind == "whiteboard":
                 self.events.append((t, "board_block", b["elements"])) # named elements get drawn by [[draw name]] cues
-            elif kind in ("narration", "exercise"):
-                text = b["text"] if kind == "narration" else "Okay, here's an exercise for you. " + b["text"] + " Pause the video here and give it a try."
-                said = B.spoken(strip_cues(text))
+            elif kind in ("narration", "exercise", "predict"):
+                text = B.speech(b)
+                said = B.spoken(text)
                 path = B.audio_path(said, tts, voice)
                 seconds = B.duration(path)
+                subtitle = strip_cues(text)
                 if kind == "exercise":
                     self.events.append((t, "card", {"kind": "exercise", "text": strip_cues(b["text"])}))
-                self.audio.append((path, seconds, "Exercise: " + strip_cues(b["text"]) + " Pause the video and give it a try." if kind == "exercise" else strip_cues(text)))
+                    subtitle = "Exercise: " + strip_cues(b["text"]) + " Pause the video and give it a try."
+                if kind == "predict": # a banner over whatever is on screen, so you can look at the code while you think
+                    self.events.append((t, "banner", {"text": strip_cues(b["text"]), "t_pause": t + seconds, "t_end": t + seconds + B.PREDICT_PAUSE}))
+                self.audio.append((path, seconds, subtitle))
                 self._cues(text, path, seconds, t)
                 t += seconds
                 if kind == "exercise":
                     self.audio.append((None, 2.0, None))
                     t += 2.0
                     self.events.append((t, "uncard", None))
+                if kind == "predict":
+                    self.audio.append((None, B.PREDICT_PAUSE, None))
+                    t += B.PREDICT_PAUSE
+                    self.events.append((t, "unbanner", None))
         self.chapter_spans.append((chapter, chapter_t0, t))
         self.duration = t
         # typing speed: finish typing in the first part of the time the cell is on screen
@@ -449,7 +457,7 @@ def simulate(lec):
     frames = [None] * n
     events = list(lec.events)
     ei = 0
-    view, card = "board", None
+    view, card, banner = "board", None, None
     scroll = {"notebook": 0.0, "editor": {}, "terminal": 0.0}
     scroll_target = {"notebook": None, "terminal": None}
     editor_file, editor_excerpt, open_files = None, None, []
@@ -475,6 +483,10 @@ def simulate(lec):
                     board_slot = 0
             elif kind == "uncard":
                 card = None
+            elif kind == "banner":
+                banner = payload
+            elif kind == "unbanner":
+                banner = None
             elif kind == "view":
                 if payload != view:
                     annotations = []
@@ -643,7 +655,7 @@ def simulate(lec):
             cursor[0] += (goal[0] - cursor[0]) * min(1.0, 9.0 / FPS)
             cursor[1] += (goal[1] - cursor[1]) * min(1.0, 9.0 / FPS)
         st = State()
-        st.t, st.view, st.card = t, view, card
+        st.t, st.view, st.card, st.banner = t, view, card, banner
         st.nb_scroll, st.term_scroll = scroll["notebook"], scroll["terminal"]
         st.editor_file = editor_file
         st.editor_scroll = scroll["editor"].get(editor_file, 0.0) if editor_file else 0.0
@@ -918,6 +930,31 @@ def draw_annotations(img, st, scroll):
             if ann["kind"] == "arrow" and u >= 1.0:
                 draw_arrowhead(d, pts, ANN)
 
+def banner_countdown(st):
+    """ the seconds left to think, once the question has been asked (None while it's being asked) """
+    if st.t < st.banner["t_pause"]:
+        return None
+    return max(1, math.ceil(st.banner["t_end"] - st.t))
+
+def draw_banner(img, st):
+    """ "pause and predict": the question in a box at the bottom of the screen, and a countdown """
+    import textwrap
+    d = ImageDraw.Draw(img)
+    lines = textwrap.wrap(hand(st.banner["text"]), 62)
+    h = 90 + 50 * len(lines)
+    x0, y0, x1, y1 = 40, H - h - 40, CW - 40, H - 40
+    region = img.crop((x0, y0, x1, y1))
+    img.paste(Image.blend(region, Image.new("RGB", region.size, "#fff6db"), 0.92), (x0, y0))
+    d.rounded_rectangle([x0, y0, x1, y1], radius=18, outline="#e0a800", width=4)
+    d.text((x0 + 30, y0 + 22), "Pause and predict", font=font(34, "sans", True), fill="#b07d00")
+    for j, line in enumerate(lines):
+        d.text((x0 + 30, y0 + 72 + 50 * j), line, font=font(40, "hand"), fill="#1f1f1f")
+    left = banner_countdown(st)
+    if left is not None:
+        cx, cy, r = x1 - 70, y0 + 50, 34
+        d.ellipse([cx - r, cy - r, cx + r, cy + r], fill="#e0a800")
+        d.text((cx, cy), str(left), font=font(40, "sans", True), fill="white", anchor="mm")
+
 CURSOR = None
 def cursor_sprite():
     global CURSOR
@@ -967,6 +1004,8 @@ def render_frame(lec, st, chrome):
         content.paste(board_image(lec, st), (0, TAB_H))
     draw_tabs(content, st)
     draw_annotations(content, st, scroll if st.view != "board" else 0.0)
+    if st.banner is not None:
+        draw_banner(content, st)
     img.paste(content.crop((0, 0, CW, H)), (0, 0))
     if 0 <= st.cursor[0] < CW - 10 and TAB_H <= st.cursor[1] < H - 10:
         sprite = cursor_sprite()
@@ -1030,7 +1069,8 @@ def frame_key(lec, st):
     else:
         dyn = tuple(min(1.0, round((st.t - el["t"]) / el["dur"], 2)) for el in lec.board.elements
                     if el.get("t") is not None and el["t"] <= st.t and not ("erased" in el and el["erased"] <= st.t))
-    return (st.view, dyn, ann, st.cursor, tuple(st.open_files), tuple(sorted(st.used.items())))
+    banner = None if st.banner is None else (st.banner["text"], banner_countdown(st))
+    return (st.view, dyn, ann, st.cursor, tuple(st.open_files), tuple(sorted(st.used.items())), banner)
 
 # -----------------------------------------------------------------------------
 # putting it all together
