@@ -810,12 +810,17 @@ def draw_tabs(img, st):
         tabs.append(("terminal", "terminal"))
     if st.used.get("board"):
         tabs.append(("whiteboard", "board"))
+    is_active = lambda key: (key == st.view) or (isinstance(key, tuple) and st.view == "editor" and key[1] == st.editor_file)
+    width = lambda tabs: sum(TAB_FONT.getlength(label) + 42 for label, _ in tabs)
+    while width(tabs) > CW - 30: # too many tabs: close the oldest file that isn't the one we're looking at
+        oldest = next((t for t in tabs if isinstance(t[1], tuple) and not is_active(t[1])), None)
+        if oldest is None:
+            break
+        tabs.remove(oldest)
     x = 12
     for label, key in tabs:
-        active = (key == st.view) or (isinstance(key, tuple) and st.view == "editor" and key[1] == st.editor_file)
+        active = is_active(key)
         w = TAB_FONT.getlength(label) + 36
-        if x + w > CW - 10:
-            break
         d.rounded_rectangle([x, 8, x + w, TAB_H + 6], radius=8, fill="#ffffff" if active else "#dcdde3")
         d.text((x + 18, 29), label, font=TAB_FONT, fill="#1f1f1f" if active else "#666666", anchor="lm")
         x += w + 6

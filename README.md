@@ -21,19 +21,22 @@ This is an independent tutorial. It isn't made by or affiliated with Andrej Karp
 | [posttraining.ipynb](posttraining.ipynb) | The lecture as a follow-along notebook, with real outputs | |
 | [lecture/lecture.md](lecture/lecture.md) | The lecture script (narration + code): the single source of truth | |
 | [lecture/build.py](lecture/build.py) | lecture.md → notebook, narration (Kokoro, ElevenLabs or Fish Audio Drama 3), video + subtitles | |
+| [lecture/screencast.py](lecture/screencast.py) | Renders the lecture as a screencast: typing in a notebook, an editor with tabs, a terminal, a whiteboard, and a mouse that points and draws, driven by `[[cues]]` in lecture.md | |
+| [lecture/align.py](lecture/align.py), [lecture/avatar.py](lecture/avatar.py) | Word timings from Whisper (so actions land on the spoken word), and the animated narrator | |
+| [video/](video/) | The rendered lectures: `v2/` (the step-by-step screencast) and `v1/` (the first, slideshow version), each with subtitles | |
 
-The lecture's chapters:
+The goal of the lecture: if you've finished Zero to Hero, you should be able to rebuild every piece of nanochat's post-training yourself. So nothing appears fully formed. Every component starts from a problem, tries the obvious thing, measures it failing, and then gets written in the notebook and tested before we look at the repo file:
 
-0. Intro
+0. Intro: the goal, and the roadmap
 1. The base model is a document simulator: why GPT-2 isn't an assistant, and the few-shot trick
-2. Conversations are just documents: special tokens, `render_conversation`, the loss mask
-3. Brain surgery on GPT-2: new token embeddings, and sanity checking the loss at init
-4. The data mixture: SmolTalk, MMLU (and its tokenizer subtleties), GSM8K tool calls, SpellingBee
-5. The SFT dataloader: padding vs. best-fit packing, and a real bug
-6. The SFT training loop: it's just pretraining with −1s in the targets
-7. The inference engine: KV cache, prefill, and tool use with forced tokens
-8. Evaluation: categorical vs. generative, ChatCORE
-9. Reinforcement learning: policy gradients from scratch, advantages, nanochat's four simplifications, pass@k
+2. Conversations are just documents: why special tokens (typed as text they're 7 ordinary tokens), `render_conversation` in three steps (tokens → mask → tool calls), the prompt at test time, checked against the repo
+3. Brain surgery on GPT-2: new embedding rows, weight tying, and sanity checking the loss at init (~15 for the special tokens vs 10.8 uniform)
+4. The data mixture: parsing GSM8K's calculator annotations into tool calls, the grader, multiple choice and its tokenizer detail, SmolTalk, writing the SpellingBee procedure, a TaskMixture in ten lines
+5. The SFT dataloader: measuring conversation lengths, naive padding (47% wasted) vs best-fit packing (8%), and the truncation bug reproduced live (a cut-off answer → zero trainable tokens → NaN)
+6. The SFT training loop: the schedule, a few live SFT steps in the notebook, then the full CPU run, and talking to the result
+7. The inference engine: naive sampling, the three KV cache changes to GPT-2, prefill and decode, tool use with forced tokens, a safe calculator
+8. Evaluation: multiple choice from the logits, generative grading, ChatCORE
+9. Reinforcement learning: the policy gradient derived on the whiteboard, a 4-logit toy REINFORCE, one real rollout group and one policy gradient step on the SFT model, nanochat's four simplifications, the RL run, pass@k → pass@1, and why "strawberry" still fails
 10. Scaling up with nanochat, and what's next (RLHF, DPO, reasoning)
 
 Every chapter has a "pause the video and try it yourself" exercise.
@@ -73,12 +76,12 @@ The defaults assume a 40GB+ GPU. On a 16GB GPU (e.g. a T4), use `python chat_sft
 
 ## Make the narrated video
 
-`lecture/build.py` turns `lecture/lecture.md` into a video. Each narration paragraph becomes one audio clip, and the screen shows the code and the real output being discussed. A lecture outline sits in a sidebar, and an animated teacher talks from a "webcam" corner. The teacher is an original cartoon presenter, labelled as an AI narrator, not a likeness of Karpathy or anyone else ([lecture/avatar.py](lecture/avatar.py)). Its lip sync is driven by the audio itself, so it works with every voice backend. Pass `--no-teacher` to leave it out. It also writes an `.srt` subtitle file. Clips are cached per paragraph, so edits only re-synthesize what changed.
+`lecture/build.py` turns `lecture/lecture.md` into a screencast, recorded the way Karpathy records his. Code gets typed into a Jupyter-style notebook and run, with the real outputs. Repo files open in an editor with tabs and scroll to the part being discussed. Training logs stream in a terminal, diagrams get drawn on a whiteboard, and a mouse cursor points at things, circles them, underlines them and writes notes. These actions are directed by `[[cues]]` inside the narration (see the top of [lecture/screencast.py](lecture/screencast.py)), and each one happens on the exact word, using word timestamps from Whisper. A lecture outline sits in a sidebar, and an animated teacher talks from a "webcam" corner. The teacher is an original cartoon presenter, labelled as an AI narrator, not a likeness of Karpathy or anyone else ([lecture/avatar.py](lecture/avatar.py)). Its lip sync is driven by the audio itself, so it works with every voice backend. Pass `--no-teacher` to leave it out. It also writes an `.srt` subtitle file. Clips are cached per paragraph, so edits only re-synthesize what changed.
 
 The default voice is [Kokoro-82M](https://huggingface.co/hexgrad/Kokoro-82M) (Apache-2.0). It runs locally, on a plain CPU, with no account or API key, at about 2x real time on 4 cores:
 
 ```bash
-pip install kokoro soundfile             # Python 3.10-3.12
+pip install kokoro soundfile faster-whisper pygments pillow   # Python 3.10-3.12 (faster-whisper times the cues to the words)
 python lecture/build.py audio            # ~30 min on a 4-core CPU
 python lecture/build.py video            # -> lecture/build/lecture.mp4 and lecture/build/lecture.srt
 ```
