@@ -501,33 +501,13 @@ def build_video(blocks, tts, voice, teacher=True):
         if e.get("audio"):
             e["seconds"] = duration(e["audio"])
 
-    # video track: consecutive entries showing the same screen form a group, and if that screen has
-    # several pages (long code), the pages are spread evenly over the time the group is on screen
-    frames, frame_cache = [], {}
-    def frame_for(screen, chapter, page):
-        key = hashlib.sha1(json.dumps([screen, chapter, page], sort_keys=True).encode()).hexdigest()[:16]
-        if key not in frame_cache:
-            frame_cache[key] = os.path.join(frames_dir, f"{key}.png")
-            render_screen(screen, chapter, frame_cache[key], page)
-        return frame_cache[key]
-    i = 0
-    while i < len(timeline):
-        j = i
-        while j < len(timeline) and timeline[j]["screen"] == timeline[i]["screen"]:
-            j += 1
-        screen, chapter = timeline[i]["screen"], timeline[i]["chapter"]
-        total = sum(e["seconds"] for e in timeline[i:j])
-        num_pages = len(layout(screen)[1]) if screen["kind"] == "code" else 1
-        for page in range(num_pages):
-            frames.append((frame_for(screen, chapter, page), total / num_pages))
-        i = j
-
     # audio track (narration + silences) and subtitles
     concat_audio, srt, t = [], [], 0.0
     silence = os.path.join(BUILD, "silence.mp3")
     subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-f", "lavfi", "-i", "anullsrc=r=44100:cl=mono", "-t", "0.5",
                     "-b:a", "128k", "-ar", "44100", silence], check=True)
     for e in timeline:
+        e["start"] = t
         if e.get("audio"):
             concat_audio.append(e["audio"])
             srt.extend(subtitles(re.sub(r"[`*]", "", e["text"]), t, e["seconds"]))
@@ -536,31 +516,66 @@ def build_video(blocks, tts, voice, teacher=True):
         t += e["seconds"]
     with open(os.path.join(BUILD, "audio.txt"), "w") as f:
         f.writelines(f"file '{a}'\n" for a in concat_audio)
-    with open(os.path.join(BUILD, "frames.txt"), "w") as f:
-        for frame, seconds in frames:
-            f.write(f"file '{frame}'\nduration {seconds:.3f}\n")
-        f.write(f"file '{frames[-1][0]}'\n") # the concat demuxer needs the last frame twice
     with open(os.path.join(BUILD, "lecture.srt"), "w", encoding="utf-8") as f:
         f.write("\n".join(srt))
-    # the teacher: a lip-synced sprite track, overlaid in the bottom right corner
+
+    # video track: consecutive entries showing the same screen form a group, and if that screen has
+    # several pages (long code), the pages are spread evenly over the time the group is on screen
+    frame_cache = {}
+    def frame_for(screen, chapter, page):
+        key = hashlib.sha1(json.dumps([screen, chapter, page], sort_keys=True).encode()).hexdigest()[:16]
+        if key not in frame_cache:
+            frame_cache[key] = os.path.join(frames_dir, f"{key}.png")
+            render_screen(screen, chapter, frame_cache[key], page)
+        return frame_cache[key]
+    def write_concat(path, items):
+        with open(path, "w") as f:
+            for file, seconds in items:
+                f.write(f"file '{file}'\nduration {seconds:.4f}\n")
+            f.write(f"file '{items[-1][0]}'\n") # the concat demuxer needs the last file twice
+
+    # render one chapter at a time (this keeps ffmpeg small), then stitch the pieces together and add the audio
     fps = 25
-    track = avatar.build_track([(e.get("audio"), e["seconds"]) for e in timeline], fps, os.path.join(BUILD, "sprites"))
-    with open(os.path.join(BUILD, "teacher.txt"), "w") as f:
-        for sprite, seconds in track:
-            f.write(f"file '{sprite}'\nduration {seconds:.4f}\n")
-        f.write(f"file '{track[-1][0]}'\n")
+    chunks_dir = os.path.join(BUILD, "chunks")
+    os.makedirs(chunks_dir, exist_ok=True)
+    starts = [k for k in range(len(timeline)) if k == 0 or timeline[k]["chapter"] != timeline[k - 1]["chapter"]]
+    chunk_paths = []
+    for c, (a, b) in enumerate(zip(starts, starts[1:] + [len(timeline)])):
+        entries = timeline[a:b]
+        frames, i = [], 0
+        while i < len(entries):
+            j = i
+            while j < len(entries) and entries[j]["screen"] == entries[i]["screen"]:
+                j += 1
+            screen, chapter = entries[i]["screen"], entries[i]["chapter"]
+            total = sum(e["seconds"] for e in entries[i:j])
+            num_pages = len(layout(screen)[1]) if screen["kind"] == "code" else 1
+            frames.extend((frame_for(screen, chapter, page), total / num_pages) for page in range(num_pages))
+            i = j
+        t0, t1 = entries[0]["start"], entries[-1]["start"] + entries[-1]["seconds"]
+        num_frames = round(t1 * fps) - round(t0 * fps) # from absolute times, so the pieces never drift from the audio
+        frames_txt, teacher_txt = os.path.join(chunks_dir, f"frames_{c:02d}.txt"), os.path.join(chunks_dir, f"teacher_{c:02d}.txt")
+        write_concat(frames_txt, frames)
+        inputs = ["-f", "concat", "-safe", "0", "-i", frames_txt]
+        if teacher:
+            track = avatar.build_track([(e.get("audio"), e["seconds"]) for e in entries], fps, os.path.join(BUILD, "sprites"), seed=c)
+            write_concat(teacher_txt, track)
+            inputs += ["-f", "concat", "-safe", "0", "-i", teacher_txt]
+            graph = f"[0:v]fps={fps}[bg];[1:v]fps={fps}[t];[bg][t]overlay={AVATAR_XY[0]}:{AVATAR_XY[1]},format=yuv420p[v]"
+        else:
+            graph = f"[0:v]fps={fps},format=yuv420p[v]"
+        chunk = os.path.join(chunks_dir, f"chunk_{c:02d}.mp4")
+        subprocess.run(["ffmpeg", "-y", "-loglevel", "error", *inputs, "-filter_complex", graph, "-map", "[v]",
+                        "-frames:v", str(num_frames), "-c:v", "libx264", "-preset", "veryfast", "-crf", "23", chunk], check=True)
+        chunk_paths.append(chunk)
+        print(f"\rrendered chapter {c + 1}/{len(starts)}", end="", flush=True)
+    print()
+    with open(os.path.join(chunks_dir, "chunks.txt"), "w") as f:
+        f.writelines(f"file '{p}'\n" for p in chunk_paths)
     out = os.path.join(BUILD, "lecture.mp4")
-    inputs = ["-f", "concat", "-safe", "0", "-i", os.path.join(BUILD, "frames.txt"),
-              "-f", "concat", "-safe", "0", "-i", os.path.join(BUILD, "audio.txt")]
-    if teacher:
-        inputs += ["-f", "concat", "-safe", "0", "-i", os.path.join(BUILD, "teacher.txt")]
-        video = ["-filter_complex", f"[0:v]fps={fps}[bg];[2:v]fps={fps}[t];[bg][t]overlay={AVATAR_XY[0]}:{AVATAR_XY[1]},format=yuv420p[v]",
-                 "-map", "[v]", "-map", "1:a"]
-    else:
-        video = ["-vf", "fps=10,format=yuv420p", "-map", "0:v", "-map", "1:a"]
-    subprocess.run(["ffmpeg", "-y", "-loglevel", "error", *inputs, *video,
-                    "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
-                    "-c:a", "aac", "-b:a", "160k", "-shortest", out], check=True)
+    subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-f", "concat", "-safe", "0", "-i", os.path.join(chunks_dir, "chunks.txt"),
+                    "-f", "concat", "-safe", "0", "-i", os.path.join(BUILD, "audio.txt"), "-map", "0:v", "-map", "1:a",
+                    "-c:v", "copy", "-c:a", "aac", "-b:a", "160k", "-movflags", "+faststart", "-shortest", out], check=True)
     print(f"wrote {out} ({t / 60:.1f} minutes) and lecture.srt")
 
 def subtitles(text, start, seconds, max_chars=90):
