@@ -165,12 +165,14 @@ PRONUNCIATIONS = [
     ("GSM8K", "G S M 8 K"), ("MMLU", "M M L U"), ("ChatCORE", "Chat Core"), ("nanochat", "nano chat"),
     ("nanoGPT", "nano G P T"), ("GPT-2", "G P T 2"), ("SFT", "S F T"), ("GRPO", "G R P O"), ("RLHF", "R L H F"),
     ("DPO", "D P O"), ("PPO", "P P O"), ("DAPO", "Dapo"), ("KV", "K V"), ("AdamW", "Adam W"), ("tiktoken", "tick token"),
-    ("ChatML", "Chat M L"), ("LLMs", "L L Ms"), ("LLM", "L L M"), ("HuggingFace", "Hugging Face"), ("makemore", "make more"),
+    ("ChatML", "Chat M L"), ("LLMs", "L L Ems"), ("LLM", "L L M"), ("HuggingFace", "Hugging Face"), ("makemore", "make more"),
     ("micrograd", "micro grad"), ("SmolTalk", "Smol Talk"), ("A100", "A 100"), ("H100s", "H 100s"), ("H100", "H 100"),
     ("bfloat16", "B float 16"), ("chat_eval", "chat eval"), ("chat_sft", "chat S F T"), ("chat_rl", "chat R L"),
     ("chat_cli", "chat C L I"), ("render_conversation", "render conversation"), ("loss_reduction", "loss reduction"),
     ("gpt.py", "the G P T dot pie file"), ("tasks.py", "tasks dot pie"), ("engine.py", "engine dot pie"),
     ("tokenizer.py", "tokenizer dot pie"), ("pass@k", "pass at k"), ("pass@1", "pass at 1"), ("nan", "NaN"),
+    ("pretraining", "pre-training"), ("pretrained", "pre-trained"), ("pretrain", "pre-train"), ("README", "read me"),
+    ("prefill", "pre-fill"),
 ]
 
 def spoken(text):
@@ -198,10 +200,18 @@ BACKENDS = {
 }
 
 # Kokoro lets us spell out the pronunciation of names it gets wrong (misaki phonemes)
-KOKORO_PRONUNCIATIONS = [("Andrej", "[Andrej](/ˈɑndɹA/)"), ("Karpathy's", "[Karpathy's](/kɑɹpˈɑθiz/)"), ("Karpathy", "[Karpathy](/kɑɹpˈɑθi/)")]
+KOKORO_PRONUNCIATIONS = [("Andrej", "[Andrej](/ˈɑndɹA/)"), ("Karpathy's", "[Karpathy's](/kɑɹpˈɑθiz/)"), ("Karpathy", "[Karpathy](/kɑɹpˈɑθi/)"),
+                         ("NaN", "[NaN](/nˈæn/)"), ("u's", "[u's](/jˈuz/)"), ("r's", "[r's](/ˈɑɹz/)"), ("eurytherm", "[eurytherm](/jˈʊɹiθɜɹm/)")]
+
+def tts_text(text, tts):
+    # the exact text that goes into the TTS backend
+    if tts == "kokoro":
+        for written, said in KOKORO_PRONUNCIATIONS:
+            text = re.sub(rf"(?<![\w\[]){re.escape(written)}(?![\w'])", said, text)
+    return text
 
 def audio_path(text, tts, voice):
-    key = hashlib.sha1(f"{tts}|{voice}|{BACKENDS[tts][1]}|{text}".encode()).hexdigest()[:16]
+    key = hashlib.sha1(f"{tts}|{voice}|{BACKENDS[tts][1]}|{tts_text(text, tts)}".encode()).hexdigest()[:16]
     return os.path.join(BUILD, "audio", f"{key}.mp3")
 
 def to_mp3(src, path):
@@ -215,9 +225,7 @@ def tts_kokoro(text, path, voice):
     if "_kokoro" not in globals():
         from kokoro import KPipeline
         _kokoro = KPipeline(lang_code="a", repo_id="hexgrad/Kokoro-82M") # American English
-    for written, said in KOKORO_PRONUNCIATIONS:
-        text = re.sub(rf"\b{re.escape(written)}(?![\w'])", said, text)
-    audio = np.concatenate([chunk for _, _, chunk in _kokoro(text, voice=voice)])
+    audio = np.concatenate([chunk for _, _, chunk in _kokoro(tts_text(text, "kokoro"), voice=voice)])
     sf.write(path + ".wav", audio, 24000)
     to_mp3(path + ".wav", path)
     os.remove(path + ".wav")
