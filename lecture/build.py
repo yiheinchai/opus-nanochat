@@ -219,6 +219,7 @@ BACKENDS = {
     "elevenlabs": ("JBFqnCBsd6RMkjVDRZzb", "eleven_multilingual_v2"), # hosted, needs ELEVENLABS_API_KEY
     "fish": ("default", "drama-3"),                                  # Fish Audio Drama 3 on your own (big) GPU server
     "silent": ("silent", "silent"),                                  # placeholder audio, to preview the video
+    "files": ("external", "files"),                                  # clips made elsewhere: lecture/tts/<voice>/<key>.mp3|wav
 }
 
 # Kokoro lets us spell out the pronunciation of names it gets wrong (misaki phonemes)
@@ -232,6 +233,26 @@ def tts_text(text, tts):
         for written, said in KOKORO_PRONUNCIATIONS:
             text = re.sub(rf"(?<![\w\[]){re.escape(written)}(?![\w'])", said, text)
     return text
+
+def clip_key(text):
+    # the name of a narration clip: a hash of exactly what gets spoken (see the manifest step)
+    return hashlib.sha1(text.encode()).hexdigest()[:16]
+
+def build_manifest(blocks):
+    """ lecture/tts/manifest.jsonl: every narration clip, in order, for generating the audio elsewhere """
+    out_dir = os.path.join(HERE, "tts")
+    os.makedirs(out_dir, exist_ok=True)
+    chapter, rows = "", []
+    for b in blocks:
+        if b["type"] == "chapter":
+            chapter = b["text"]
+        elif b["type"] in ("narration", "exercise"):
+            text = b["text"] if b["type"] == "narration" else "Okay, here's an exercise for you. " + b["text"] + " Pause the video here and give it a try."
+            said = spoken(text)
+            rows.append({"index": len(rows), "key": clip_key(said), "chapter": chapter, "kind": b["type"], "text": said})
+    with open(os.path.join(out_dir, "manifest.jsonl"), "w", encoding="utf-8") as f:
+        f.writelines(json.dumps(r, ensure_ascii=False) + "\n" for r in rows)
+    print(f"wrote {len(rows)} clips ({sum(len(r['text']) for r in rows):,} characters) to lecture/tts/manifest.jsonl")
 
 def audio_path(text, tts, voice):
     key = hashlib.sha1(f"{tts}|{voice}|{BACKENDS[tts][1]}|{tts_text(text, tts)}".encode()).hexdigest()[:16]
@@ -304,7 +325,13 @@ def build_audio(blocks, tts, voice):
         path = audio_path(text, tts, voice)
         if os.path.exists(path):
             continue # already generated: every clip is cached, so edits only re-synthesize what changed
-        if tts == "kokoro":
+        if tts == "files":
+            source = next((os.path.join(HERE, "tts", voice, clip_key(text) + ext) for ext in (".mp3", ".wav", ".flac", ".ogg")
+                           if os.path.exists(os.path.join(HERE, "tts", voice, clip_key(text) + ext))), None)
+            if source is None:
+                sys.exit(f"missing lecture/tts/{voice}/{clip_key(text)}.mp3 (clip {i} of the manifest)")
+            to_mp3(source, path)
+        elif tts == "kokoro":
             tts_kokoro(text, path, voice)
         elif tts == "fish":
             tts_fish(text, path, voice)
@@ -629,7 +656,7 @@ subtitles.counter = 0
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("step", choices=["notebook", "audio", "video", "all", "stats"])
+    parser.add_argument("step", choices=["notebook", "audio", "video", "all", "stats", "manifest"])
     parser.add_argument("--execute", action="store_true", help="execute the notebook's python cells")
     parser.add_argument("--tts", choices=list(BACKENDS), default="kokoro", help="text-to-speech backend")
     parser.add_argument("--voice", default=None, help="voice for the backend (default: kokoro am_michael, ElevenLabs George)")
@@ -646,6 +673,8 @@ if __name__ == "__main__":
         segments = narration_segments(blocks)
         words = sum(len(s.split()) for s in segments)
         print(f"{len(segments)} segments, {words:,} words, {sum(len(s) for s in segments):,} characters, ~{words / 150:.0f} minutes")
+    if args.step == "manifest":
+        build_manifest(blocks)
     if args.step in ("notebook", "all"):
         build_notebook(blocks, execute=args.execute or args.step == "all")
     if args.step in ("audio", "all"):
