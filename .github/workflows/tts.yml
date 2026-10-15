@@ -1,22 +1,25 @@
-# Generates the lecture narration with ElevenLabs, using the repository secret ELEVENLABS_API_KEY,
-# and uploads the clips as a workflow artifact (so no audio gets committed to the repo).
+# Generates the lecture narration with a hosted TTS (Gemini or ElevenLabs), using the repository secret
+# GEMINI_API_KEY or ELEVENLABS_API_KEY, and uploads the clips as a workflow artifact (no audio gets committed).
 name: tts
 
 on:
   workflow_dispatch:
     inputs:
+      backend:
+        description: "gemini or elevenlabs"
+        default: "gemini"
       mode:
-        description: "list (models, voices, quota) or generate"
+        description: "list (models, voices) or generate"
         default: "list"
       model:
-        description: "ElevenLabs model id"
-        default: "eleven_v3"
+        description: "model id (empty: the backend's default)"
+        default: ""
       voices:
-        description: "voice id(s), comma separated"
+        description: "voice id(s) or name(s), comma separated (empty: the backend's default)"
         default: ""
       indices:
         description: "manifest indices (comma separated) or 'all'"
-        default: "0,70,75,93"
+        default: "0,93"
 
 permissions:
   contents: read
@@ -24,24 +27,35 @@ permissions:
 jobs:
   tts:
     runs-on: ubuntu-latest
-    timeout-minutes: 300
+    timeout-minutes: 340
     steps:
       - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: List models, voices and quota
+      - name: Install ffmpeg
+        if: inputs.mode == 'generate'
+        run: which ffmpeg || (sudo apt-get update && sudo apt-get install -y ffmpeg)
+      - name: List
         if: inputs.mode == 'list'
         env:
           ELEVENLABS_API_KEY: ${{ secrets.ELEVENLABS_API_KEY }}
-        run: python lecture/tts/elevenlabs_job.py list
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: python lecture/tts/${{ inputs.backend == 'elevenlabs' && 'elevenlabs_job.py' || 'gemini_job.py' }} list
       - name: Generate
         if: inputs.mode == 'generate'
         env:
           ELEVENLABS_API_KEY: ${{ secrets.ELEVENLABS_API_KEY }}
-        run: python lecture/tts/elevenlabs_job.py generate --model "${{ inputs.model }}" --voice "${{ inputs.voices }}" --indices "${{ inputs.indices }}" --out narration
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          MODEL: ${{ inputs.model }}
+          VOICES: ${{ inputs.voices }}
+          INDICES: ${{ inputs.indices }}
+        run: |
+          script=lecture/tts/${{ inputs.backend == 'elevenlabs' && 'elevenlabs_job.py' || 'gemini_job.py' }}
+          args=(generate --indices "$INDICES" --out narration)
+          if [ -n "$MODEL" ]; then args+=(--model "$MODEL"); fi
+          if [ -n "$VOICES" ]; then args+=(--voice "$VOICES"); fi
+          python "$script" "${args[@]}"
       - name: Upload the clips (also after a partial failure, so nothing is lost)
         if: always() && inputs.mode == 'generate'
         uses: actions/upload-artifact@v4
