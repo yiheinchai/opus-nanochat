@@ -3,7 +3,7 @@ Generates the lecture narration with Gemini TTS. Runs inside GitHub Actions (.gi
 where the API key comes from the repository secret GEMINI_API_KEY. The key is never printed or saved.
 
 python lecture/tts/gemini_job.py list
-python lecture/tts/gemini_job.py generate --model gemini-2.5-pro-preview-tts --voice Charon --indices 0,93 --out narration
+python lecture/tts/gemini_job.py generate --model gemini-3.8-flash-tts --voice Charon --indices 0,93 --out narration
 """
 
 import os
@@ -18,7 +18,7 @@ import urllib.error
 import urllib.request
 
 API = "https://generativelanguage.googleapis.com/v1beta"
-STYLE = "You are the narrator of a coding lecture. Read the text in a relaxed, friendly lecturer tone, at a conversational pace. Read only the text, exactly as written."
+STYLE = "You are the narrator of a coding lecture. Read the text in a relaxed, friendly lecturer tone, at an unhurried, conversational pace, like explaining code to a friend. Read only the text, exactly as written."
 
 def request(method, path, body=None):
     key = os.environ.get("GEMINI_API_KEY")
@@ -90,7 +90,7 @@ def generate(model, voice, indices, out):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("mode", choices=["list", "generate"])
-    parser.add_argument("--model", default="gemini-2.5-pro-preview-tts")
+    parser.add_argument("--model", default="gemini-3.8-flash-tts")
     parser.add_argument("--voice", default="Charon")
     parser.add_argument("--indices", default="0,93", help="manifest indices, or 'all'")
     parser.add_argument("--out", default="lecture/tts")
