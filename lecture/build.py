@@ -176,7 +176,7 @@ PRONUNCIATIONS = [
     ("tokenizer.py", "tokenizer dot pie"), ("pass@k", "pass at k"), ("pass@1", "pass at 1"), ("nan", "NaN"),
     ("pretraining", "pre-training"), ("pretrained", "pre-trained"), ("pretrain", "pre-train"), ("README", "read me"),
     ("prefill", "pre-fill"), ("BOS", "B O S"), ("pyarrow", "pie arrow"), ("KL", "K L"), ("REINFORCE", "reinforce"),
-    ("argmax", "arg max"),
+    ("argmax", "arg max"), ("Pretraining", "Pre-training"), ("ids", "I Ds"),
 ]
 
 CUE_RE = re.compile(r"\[\[(.*?)\]\] ")
@@ -223,7 +223,8 @@ BACKENDS = {
 
 # Kokoro lets us spell out the pronunciation of names it gets wrong (misaki phonemes)
 KOKORO_PRONUNCIATIONS = [("Andrej", "[Andrej](/ˈɑndɹA/)"), ("Karpathy's", "[Karpathy's](/kɑɹpˈɑθiz/)"), ("Karpathy", "[Karpathy](/kɑɹpˈɑθi/)"),
-                         ("NaN", "[NaN](/nˈæn/)"), ("u's", "[u's](/jˈuz/)"), ("r's", "[r's](/ˈɑɹz/)"), ("eurytherm", "[eurytherm](/jˈʊɹiθɜɹm/)")]
+                         ("NaN", "[NaN](/nˈæn/)"), ("u's", "[u's](/jˈuz/)"), ("r's", "[r's](/ˈɑɹz/)"), ("eurytherm", "[eurytherm](/jˈʊɹiθɜɹm/)"),
+                         ("few-shot", "[few-shot](/fjˈu ʃˈɑt/)")]
 
 def tts_text(text, tts):
     # the exact text that goes into the TTS backend
