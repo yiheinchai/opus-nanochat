@@ -1,10 +1,12 @@
 # Let's build the post-training of nanochat
 
-A from-scratch lecture on **all of LLM post-training**: chat formats and special tokens, supervised finetuning (SFT), an inference engine with a KV cache and tool use, evaluation, and reinforcement learning. It is written in the style of Andrej Karpathy's [Neural Networks: Zero to Hero](https://karpathy.ai/zero-to-hero.html) and follows the post-training pipeline of his [nanochat](https://github.com/karpathy/nanochat) repo file for file.
+A from-scratch lecture on **all of LLM post-training**: chat formats and special tokens, supervised finetuning (SFT), an inference engine with a KV cache and tool use, evaluation, reinforcement learning, and preference optimization (DPO). It is written in the style of Andrej Karpathy's [Neural Networks: Zero to Hero](https://karpathy.ai/zero-to-hero.html) and follows the post-training pipeline of his [nanochat](https://github.com/karpathy/nanochat) repo file for file.
 
-We start where ["Let's reproduce GPT-2 (124M)"](https://www.youtube.com/watch?v=l8pRSuU81PU) ends: with a GPT-2 base model that can only babble. We end with an assistant that answers questions, uses a python tool for arithmetic, answers multiple choice, and counts the r's in strawberry. Then RL makes it better at that by practicing on its own.
+We start where ["Let's reproduce GPT-2 (124M)"](https://www.youtube.com/watch?v=l8pRSuU81PU) ends: with a GPT-2 base model that can only babble. We end with an assistant that answers questions, uses a python tool for arithmetic, answers multiple choice, and counts the r's in strawberry. Then RL makes it better at that by practicing on its own, and DPO fixes a bad habit it picked up along the way, from nothing but pairs of its own answers.
 
-This is an independent tutorial. It isn't made by or affiliated with Andrej Karpathy, and the narration uses a stock synthetic voice (Kokoro's `am_michael` by default), not a clone of his.
+This is an independent tutorial. It isn't made by or affiliated with Andrej Karpathy, and the narration uses a stock synthetic voice (a stock ElevenLabs voice in V3, Kokoro's `am_michael` in the local build), not a clone of his.
+
+**How to use it:** watch a chapter, then close the video and do that chapter's exercises in [exercises.ipynb](exercises.ipynb). Every exercise is one function of the pipeline, with a check that runs it against the real thing and tells you exactly what's wrong. When all of them pass, you've rebuilt nanochat's post-training yourself. [CHEATSHEET.md](CHEATSHEET.md) has the whole recipe, the numbers to sanity check against, and a debugging checklist on one page.
 
 ## What's in here
 
@@ -17,13 +19,17 @@ This is an independent tutorial. It isn't made by or affiliated with Andrej Karp
 | [chat_sft.py](chat_sft.py) | SFT with a best-fit packing dataloader and masked loss | `scripts/chat_sft.py` |
 | [chat_eval.py](chat_eval.py) | Categorical (multiple choice) and generative evals, ChatCORE | `scripts/chat_eval.py` |
 | [chat_rl.py](chat_rl.py) | "GRPO", which is really REINFORCE with a group mean baseline | `scripts/chat_rl.py` |
+| [chat_dpo.py](chat_dpo.py) | DPO: preference pairs from the model's own answers, a frozen reference, the DPO loss | (not in nanochat) |
 | [chat_cli.py](chat_cli.py) | Talk to your model | `scripts/chat_cli.py` |
 | [posttraining.ipynb](posttraining.ipynb) | The lecture as a follow-along notebook, with real outputs | |
+| [exercises.ipynb](exercises.ipynb) | 18 exercises: write each piece yourself, an automatic check tells you what's wrong, solutions hidden until you click | |
+| [checks.py](checks.py) | The checks behind the exercises | |
+| [CHEATSHEET.md](CHEATSHEET.md) | The recipe, the sanity-check numbers, and the debugging checklist | |
 | [lecture/lecture.md](lecture/lecture.md) | The lecture script (narration + code): the single source of truth | |
 | [lecture/build.py](lecture/build.py) | lecture.md → notebook, narration (Kokoro, ElevenLabs or Fish Audio Drama 3), video + subtitles | |
 | [lecture/screencast.py](lecture/screencast.py) | Renders the lecture as a screencast: typing in a notebook, an editor with tabs, a terminal, a whiteboard, and a mouse that points and draws, driven by `[[cues]]` in lecture.md | |
 | [lecture/align.py](lecture/align.py), [lecture/avatar.py](lecture/avatar.py) | Word timings from Whisper (so actions land on the spoken word), and the animated narrator | |
-| [video/](video/) | The rendered lectures: `v2/` (the step-by-step screencast) and `v1/` (the first, slideshow version), each with subtitles | |
+| [video/](video/) | The rendered lectures: `v3/` (the latest), `v2/` (the step-by-step screencast) and `v1/` (the first, slideshow version), each with subtitles | |
 
 The goal of the lecture: if you've finished Zero to Hero, you should be able to rebuild every piece of nanochat's post-training yourself. So nothing appears fully formed. Every component starts from a problem, tries the obvious thing, measures it failing, and then gets written in the notebook and tested before we look at the repo file:
 
@@ -37,9 +43,10 @@ The goal of the lecture: if you've finished Zero to Hero, you should be able to 
 7. The inference engine: naive sampling, the three KV cache changes to GPT-2, prefill and decode, tool use with forced tokens, a safe calculator
 8. Evaluation: multiple choice from the logits, generative grading, ChatCORE
 9. Reinforcement learning: the policy gradient derived on the whiteboard, a 4-logit toy REINFORCE, one real rollout group and one policy gradient step on the SFT model, nanochat's four simplifications, the RL run, pass@k → pass@1, and why "strawberry" still fails
-10. Scaling up with nanochat, and what's next (RLHF, DPO, reasoning)
+10. Preferences, DPO: measuring the SpellingBee habit leaking into ordinary answers, RLHF as InstructGPT did it, DPO derived on the whiteboard (Bradley-Terry, the KL-regularized objective, and the partition function that cancels), a 4-logit toy that shows what beta does, a real pair and a real DPO step (the loss at init is exactly ln 2), the full run, and the result
+11. Putting it all together: the recipe, a debugging checklist made of every failure in the lecture, nanochat at scale, and what's next (reward models, reasoning)
 
-Every chapter has a "pause the video and try it yourself" exercise.
+Every chapter has a "pause the video and try it yourself" exercise, linked to the matching exercises in the notebook. Throughout the video, a "pause and predict" box with a short countdown asks you to commit to a guess before the answer is shown.
 
 ## Results from the lecture's run
 
