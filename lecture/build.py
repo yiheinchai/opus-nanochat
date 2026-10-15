@@ -2,11 +2,12 @@
 Turns lecture/lecture.md into the follow-along notebook, the narration, and the video.
 
 python lecture/build.py notebook --execute   # posttraining.ipynb, with real outputs (runs the python cells)
-python lecture/build.py audio                # narration with ElevenLabs (needs ELEVENLABS_API_KEY)
-python lecture/build.py video                # lecture/build/lecture.mp4 + lecture.srt
+python lecture/build.py audio                # narration with Kokoro-82M, locally (pip install kokoro soundfile)
+python lecture/build.py audio --tts=elevenlabs   # or ElevenLabs (needs ELEVENLABS_API_KEY), or --tts=fish for Drama 3
+python lecture/build.py video                # lecture/build/lecture.mp4 + lecture.srt (same --tts as the audio step)
 python lecture/build.py all
 
-python lecture/build.py audio --tts=silent   # no API key? silent placeholder audio, to preview the video timing
+python lecture/build.py audio --tts=silent   # silent placeholder audio, to preview the video timing
 python lecture/build.py video --chapters=2   # a quick preview of just the first two chapters
 """
 
@@ -188,22 +189,66 @@ def narration_segments(blocks):
             segments.append(spoken("Okay, here's an exercise for you. " + b["text"] + " Pause the video here and give it a try."))
     return segments
 
-def audio_path(text, voice, model):
-    key = hashlib.sha1(f"{voice}|{model}|{text}".encode()).hexdigest()[:16]
+# text-to-speech backends: name -> (default voice, model)
+BACKENDS = {
+    "kokoro": ("am_michael", "kokoro-82m"),                         # open weights, runs on a CPU, no account needed
+    "elevenlabs": ("JBFqnCBsd6RMkjVDRZzb", "eleven_multilingual_v2"), # hosted, needs ELEVENLABS_API_KEY
+    "fish": ("default", "drama-3"),                                  # Fish Audio Drama 3 on your own (big) GPU server
+    "silent": ("silent", "silent"),                                  # placeholder audio, to preview the video
+}
+
+# Kokoro lets us spell out the pronunciation of names it gets wrong (misaki phonemes)
+KOKORO_PRONUNCIATIONS = [("Andrej", "[Andrej](/ˈɑndɹA/)"), ("Karpathy's", "[Karpathy's](/kɑɹpˈɑθiz/)"), ("Karpathy", "[Karpathy](/kɑɹpˈɑθi/)")]
+
+def audio_path(text, tts, voice):
+    key = hashlib.sha1(f"{tts}|{voice}|{BACKENDS[tts][1]}|{text}".encode()).hexdigest()[:16]
     return os.path.join(BUILD, "audio", f"{key}.mp3")
 
-def tts_elevenlabs(text, path, voice, model, previous_text, next_text):
+def to_mp3(src, path):
+    # every clip ends up as the same kind of mp3, so that they can be concatenated
+    subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", src, "-ar", "44100", "-ac", "1", "-b:a", "128k", path], check=True)
+
+def tts_kokoro(text, path, voice):
+    import numpy as np
+    import soundfile as sf
+    global _kokoro
+    if "_kokoro" not in globals():
+        from kokoro import KPipeline
+        _kokoro = KPipeline(lang_code="a", repo_id="hexgrad/Kokoro-82M") # American English
+    for written, said in KOKORO_PRONUNCIATIONS:
+        text = re.sub(rf"\b{re.escape(written)}(?![\w'])", said, text)
+    audio = np.concatenate([chunk for _, _, chunk in _kokoro(text, voice=voice)])
+    sf.write(path + ".wav", audio, 24000)
+    to_mp3(path + ".wav", path)
+    os.remove(path + ".wav")
+
+def tts_fish(text, path, voice):
+    """
+    Fish Audio Drama 3, served with sglang-omni on your own GPU (it needs an A100/H100 80GB, see the README).
+    NOTE: untested, written against the /v1/audio/speech endpoint described on the model card.
+    """
+    import requests
+    url = os.environ.get("FISH_TTS_URL", "http://localhost:8000/v1/audio/speech")
+    response = requests.post(url, json={"input": text}, timeout=600)
+    if response.status_code != 200:
+        sys.exit(f"Drama 3 server error {response.status_code}: {response.text[:500]}")
+    with open(path + ".raw", "wb") as f:
+        f.write(response.content)
+    to_mp3(path + ".raw", path)
+    os.remove(path + ".raw")
+
+def tts_elevenlabs(text, path, voice, previous_text, next_text):
     import requests
     api_key = os.environ.get("ELEVENLABS_API_KEY")
     if not api_key:
-        sys.exit("Set the ELEVENLABS_API_KEY environment variable (see the README), or use --tts=silent")
+        sys.exit("Set the ELEVENLABS_API_KEY environment variable (see the README), or use --tts=kokoro")
     response = requests.post(
         f"https://api.elevenlabs.io/v1/text-to-speech/{voice}",
         params={"output_format": "mp3_44100_128"},
         headers={"xi-api-key": api_key, "Content-Type": "application/json"},
         json={
             "text": text,
-            "model_id": model,
+            "model_id": BACKENDS["elevenlabs"][1],
             "previous_text": previous_text, # gives the voice continuity across paragraphs
             "next_text": next_text,
             "voice_settings": {"stability": 0.45, "similarity_boost": 0.75, "style": 0.15, "use_speaker_boost": True},
@@ -220,19 +265,20 @@ def tts_silent(text, path):
     subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-f", "lavfi", "-i", "anullsrc=r=44100:cl=mono",
                     "-t", f"{seconds:.2f}", "-b:a", "64k", path], check=True)
 
-def build_audio(blocks, tts, voice, model):
+def build_audio(blocks, tts, voice):
     segments = narration_segments(blocks)
     os.makedirs(os.path.join(BUILD, "audio"), exist_ok=True)
-    total_chars = sum(len(s) for s in segments)
-    print(f"{len(segments)} narration segments, {total_chars:,} characters")
+    print(f"{len(segments)} narration segments, {sum(len(s) for s in segments):,} characters")
     for i, text in enumerate(segments):
-        path = audio_path(text, voice if tts == "elevenlabs" else "silent", model)
+        path = audio_path(text, tts, voice)
         if os.path.exists(path):
-            continue # already generated, ElevenLabs charges per character so we cache everything
-        if tts == "elevenlabs":
-            previous_text = segments[i - 1] if i > 0 else None
-            next_text = segments[i + 1] if i + 1 < len(segments) else None
-            tts_elevenlabs(text, path, voice, model, previous_text, next_text)
+            continue # already generated: every clip is cached, so edits only re-synthesize what changed
+        if tts == "kokoro":
+            tts_kokoro(text, path, voice)
+        elif tts == "fish":
+            tts_fish(text, path, voice)
+        elif tts == "elevenlabs":
+            tts_elevenlabs(text, path, voice, segments[i - 1] if i > 0 else None, segments[i + 1] if i + 1 < len(segments) else None)
         else:
             tts_silent(text, path)
         print(f"\r[{i + 1}/{len(segments)}] {path}", end="", flush=True)
@@ -387,11 +433,10 @@ def render_screen(screen, chapter, path, page=0):
         draw_lines(draw, out_w, left + 20, y + 20, fnt, line_h)
     img.save(path)
 
-def build_video(blocks, voice, model, tts):
+def build_video(blocks, tts, voice):
     outputs = notebook_outputs()
     frames_dir = os.path.join(BUILD, "frames")
     os.makedirs(frames_dir, exist_ok=True)
-    voice_key = voice if tts == "elevenlabs" else "silent"
     timeline = [] # dicts of: screen, audio path (or None for silence), seconds, subtitle text
     screen, chapter, chapter_number = None, "", 0
     for b in blocks:
@@ -411,11 +456,11 @@ def build_video(blocks, voice, model, tts):
             screen = dict(screen, output=b["text"])
             timeline.append({"screen": screen, "chapter": chapter, "seconds": 1.5})
         elif b["type"] == "narration":
-            timeline.append({"screen": screen, "chapter": chapter, "audio": audio_path(spoken(b["text"]), voice_key, model), "text": b["text"]})
+            timeline.append({"screen": screen, "chapter": chapter, "audio": audio_path(spoken(b["text"]), tts, voice), "text": b["text"]})
         elif b["type"] == "exercise":
             text = spoken("Okay, here's an exercise for you. " + b["text"] + " Pause the video here and give it a try.")
             card = {"kind": "exercise", "text": b["text"]}
-            timeline.append({"screen": card, "chapter": chapter, "audio": audio_path(text, voice_key, model),
+            timeline.append({"screen": card, "chapter": chapter, "audio": audio_path(text, tts, voice),
                              "text": "Exercise: " + b["text"] + " Pause the video and give it a try."})
             timeline.append({"screen": card, "chapter": chapter, "seconds": 2.0})
 
@@ -500,11 +545,11 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("step", choices=["notebook", "audio", "video", "all", "stats"])
     parser.add_argument("--execute", action="store_true", help="execute the notebook's python cells")
-    parser.add_argument("--tts", choices=["elevenlabs", "silent"], default="elevenlabs")
-    parser.add_argument("--voice", default=os.environ.get("ELEVENLABS_VOICE_ID", "JBFqnCBsd6RMkjVDRZzb"), help="ElevenLabs voice id (default: George)")
-    parser.add_argument("--model", default="eleven_multilingual_v2", help="ElevenLabs model id")
+    parser.add_argument("--tts", choices=list(BACKENDS), default="kokoro", help="text-to-speech backend")
+    parser.add_argument("--voice", default=None, help="voice for the backend (default: kokoro am_michael, ElevenLabs George)")
     parser.add_argument("--chapters", type=int, default=None, help="only the first N chapters (for a quick preview)")
     args = parser.parse_args()
+    voice = args.voice or os.environ.get("ELEVENLABS_VOICE_ID" if args.tts == "elevenlabs" else "TTS_VOICE") or BACKENDS[args.tts][0]
     blocks = parse()
     if args.chapters is not None:
         chapter_starts = [i for i, b in enumerate(blocks) if b["type"] == "chapter"]
@@ -517,6 +562,6 @@ if __name__ == "__main__":
     if args.step in ("notebook", "all"):
         build_notebook(blocks, execute=args.execute or args.step == "all")
     if args.step in ("audio", "all"):
-        build_audio(blocks, args.tts, args.voice, args.model)
+        build_audio(blocks, args.tts, voice)
     if args.step in ("video", "all"):
-        build_video(blocks, args.voice, args.model, args.tts)
+        build_video(blocks, args.tts, voice)

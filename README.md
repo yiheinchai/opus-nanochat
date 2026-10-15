@@ -4,7 +4,7 @@ A from-scratch lecture on **all of LLM post-training**: chat formats and special
 
 We start where ["Let's reproduce GPT-2 (124M)"](https://www.youtube.com/watch?v=l8pRSuU81PU) ends: with a GPT-2 base model that can only babble. We end with an assistant that answers questions, uses a python tool for arithmetic, answers multiple choice, and counts the r's in strawberry. Then RL makes it better at that by practicing on its own.
 
-This is an independent tutorial. It isn't made by or affiliated with Andrej Karpathy, and the narration uses a stock ElevenLabs voice, not a clone of his.
+This is an independent tutorial. It isn't made by or affiliated with Andrej Karpathy, and the narration uses a stock synthetic voice (Kokoro's `am_michael` by default), not a clone of his.
 
 ## What's in here
 
@@ -20,7 +20,7 @@ This is an independent tutorial. It isn't made by or affiliated with Andrej Karp
 | [chat_cli.py](chat_cli.py) | Talk to your model | `scripts/chat_cli.py` |
 | [posttraining.ipynb](posttraining.ipynb) | The lecture as a follow-along notebook, with real outputs | |
 | [lecture/lecture.md](lecture/lecture.md) | The lecture script (narration + code): the single source of truth | |
-| [lecture/build.py](lecture/build.py) | lecture.md → notebook, ElevenLabs narration, video + subtitles | |
+| [lecture/build.py](lecture/build.py) | lecture.md → notebook, narration (Kokoro, ElevenLabs or Fish Audio Drama 3), video + subtitles | |
 
 The lecture's chapters:
 
@@ -71,21 +71,24 @@ python chat_cli.py -i rl
 
 The defaults assume a 40GB+ GPU. On a 16GB GPU (e.g. a T4), use `python chat_sft.py --device-batch-size=4 --grad-accum=16`, which gives the same total batch size. The small CPU-sized commands used in the lecture are in the docstrings at the top of `chat_sft.py` and `chat_rl.py`. Downloads and checkpoints go to `~/.cache/nanochat-posttrain` (override with `NANOCHAT_BASE_DIR`).
 
-## Make the narrated video (ElevenLabs)
+## Make the narrated video
 
-`lecture/build.py` turns `lecture/lecture.md` into a video. Each narration paragraph becomes one ElevenLabs clip, and the screen shows the code and real output being discussed. It also writes an `.srt` subtitle file.
+`lecture/build.py` turns `lecture/lecture.md` into a video. Each narration paragraph becomes one audio clip, and the screen shows the code and the real output being discussed. It also writes an `.srt` subtitle file. Clips are cached per paragraph, so edits only re-synthesize what changed.
 
-1. Create an ElevenLabs account and an API key (Profile → API Keys). The lecture is about 49,000 characters (roughly an hour of audio), so check that your plan's monthly character quota covers it. `python lecture/build.py stats` prints the exact count.
-2. Keep the key out of the code and the chat. Put it in an environment variable or a Colab Secret named `ELEVENLABS_API_KEY`.
-3. Run:
+The default voice is [Kokoro-82M](https://huggingface.co/hexgrad/Kokoro-82M) (Apache-2.0). It runs locally, on a plain CPU, with no account or API key, at about 2x real time on 4 cores:
 
 ```bash
-export ELEVENLABS_API_KEY=...            # or, on Colab, use the Secrets panel (see lecture/make_video_colab.ipynb)
-python lecture/build.py audio            # cached per paragraph, so edits only re-synthesize what changed
+pip install kokoro soundfile             # Python 3.10-3.12
+python lecture/build.py audio            # ~30 min on a 4-core CPU
 python lecture/build.py video            # -> lecture/build/lecture.mp4 and lecture/build/lecture.srt
 ```
 
-The easiest path is [lecture/make_video_colab.ipynb](lecture/make_video_colab.ipynb), which needs no GPU. The default voice is the stock ElevenLabs voice "George". To use a different one, set `ELEVENLABS_VOICE_ID` to any voice id from your ElevenLabs voice library. To preview timing without an API key, run `python lecture/build.py audio --tts=silent` and then `python lecture/build.py video --tts=silent`.
+Two other backends are built in. Pass the same `--tts` to both the `audio` and the `video` step:
+
+- `--tts=elevenlabs`: hosted. Create an API key, keep it out of code and chat (environment variable or Colab Secret `ELEVENLABS_API_KEY`), and check that your plan's character quota covers the ~49,000 characters (`python lecture/build.py stats`). [lecture/make_video_colab.ipynb](lecture/make_video_colab.ipynb) does this on Colab.
+- `--tts=fish`: [Fish Audio Drama 3](https://huggingface.co/fishaudio/drama-3-int4), open weights, served on your own GPU with [sglang-omni](https://github.com/sgl-project/sglang-omni). Even the int4 version needs an Ampere-or-newer GPU and used about 57GB at startup in Fish Audio's A100-80GB test, so think Colab H100 rather than a laptop. Start the server (`sgl-omni serve --model-path fishaudio/drama-3-int4 --port 8000`), then run the build with `FISH_TTS_URL=http://localhost:8000/v1/audio/speech`. This backend is untested: it was written against the model card, without access to a big enough GPU. Mind the Fish Audio Community License: it is free for research, non-commercial use, and small commercial use.
+
+`--voice` picks a voice for the backend. For example `--voice=af_heart` for Kokoro, or an ElevenLabs voice id. To preview timing without any TTS, run `audio --tts=silent` and then `video --tts=silent`, and add `--chapters=2` to render only the first two chapters.
 
 To change the lecture, edit `lecture/lecture.md` and rebuild. Code shown from the repo files is pulled in at build time with `from=FILE start="..."`, so the video always shows the current code. Re-execute the notebook (`python lecture/build.py notebook --execute`) so that the outputs on screen stay real.
 
