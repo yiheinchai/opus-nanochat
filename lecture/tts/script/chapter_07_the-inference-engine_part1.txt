@@ -1,0 +1,15 @@
+Okay, so far we've been using the Engine to sample, as a black box. Now let's write it. Sampling has two problems that we need to solve: it needs to be fast, because in reinforcement learning we're going to sample a lot, and it needs to run the python tool. Let's start with speed. Here's the simplest sampling loop you could write, the one from the G P T 2 video.
+
+Several seconds for 100 tokens. Why is it slow? Think about what this loop does. To get token number 7, it runs tokens 1 through 6 through the model. Then to get token 8, it runs tokens 1 through 7 through the model, all of them, again. But nothing about tokens 1 through 6 has changed! Because of the causal mask, a token can only look at tokens before it, so its keys and values in every layer are exactly the same as last time. We're recomputing them over and over, and the total work grows like the square of the length.
+
+So the fix is to remember them. That's the K V cache. For every layer, we keep the keys and values of all the tokens so far, and when a new token comes in, we only compute the query, key and value for that one token, append its key and value to the cache, and let its query attend to everything in the cache. Now, this needs three small changes inside our GPT, and you should make them in your own G P T dot pie from the G P T 2 video. Change one is the cache itself. It's a tiny class that holds the keys and values, and update appends the new ones and returns everything. Change two is in the attention. If there's a cache, we append and get back all the keys and values. And here's a subtle one.
+
+Pause and predict. When we feed in just one new token, and everything else is in the cache, should the attention use a causal mask?
+
+If we feed in a single new token, we don't want a causal mask at all, because that one token is allowed to look at everything in the cache. And change three, the positions. The position embedding of the new token must start where the cache left off, otherwise every new token would think it's at position zero. And with that, here's sampling with a cache.
+
+First we run the whole prompt through once, which fills the cache. That's called the pre-fill. And then every step, we only feed in the one new token. Exactly the same tokens as the naive version, which is the first thing to always check, and about four times faster. And that gap grows with length. And here's the cache of the first layer: batch of one, twelve heads, 106 positions, which is our 6 prompt tokens plus 100 new ones, and 64 dimensions per head.
+
+One more trick, which we'll need for reinforcement learning. Often we want many samples for the same prompt. So we do the pre-fill once, with a batch size of one, and then we just copy the cache for every sample, and decode all of them in parallel, as one batch.
+
+Okay, now the second job, tools. The model is sampling one token at a time. At some point it emits python start, then some tokens, then python end.

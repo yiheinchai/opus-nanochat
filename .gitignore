@@ -3,3 +3,4 @@ __pycache__/
 lecture/build/
 *.pt
 lecture/tts/*/
+!lecture/tts/script/

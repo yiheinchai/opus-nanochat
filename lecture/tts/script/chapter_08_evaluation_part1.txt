@@ -1,0 +1,15 @@
+Okay, so we have a model that seems to work. But "seems to work" is not good enough, we need numbers. And there are two kinds of evaluation in nano chat.
+
+The first is multiple choice, like M M L U. And here's a neat thing: we don't even have to sample. We render the question, prime the assistant, and run one forward pass. Then we look at the logits at the last position, which is the model's prediction for the first token of its answer, but only at the logits of the allowed letters, A, B, C and D. Whichever is biggest, that's the answer. Let's write it, and compare the base model and our S F T model on 100 questions.
+
+Pause and predict. Four choices per question. What accuracy do you expect from G P T 2, and from our S F T model?
+
+One forward pass, the logits at the last position, restricted to the letters. And both are about 25 percent, which is exactly random guessing for four choices. And with only 100 questions, the noise on these numbers is about plus or minus five percent, so 29 versus 26 is not a real difference. Now this is important to understand. G P T 2 small simply doesn't know the answers to these questions. S F T can teach a format, but it can't teach knowledge that isn't there. For M M L U to move, you need a much stronger pre-trained model, which is a big part of why nano chat trains its own base models.
+
+The second kind is generative. We sample an answer, pull out the number after the hash signs, and compare. Let's do 20 SpellingBee questions the model has never seen.
+
+Nine out of twenty. So about half. That's a narrow, procedural task, and S F T taught the model a procedure that it can actually execute, most of the time. In the repo, chat eval dot pie has both of these, plus something nano chat calls Chat Core: every accuracy is rescaled so that zero means random guessing and one means perfect, and then averaged into one number. Here's what I got on 100 problems of every task.
+
+Multiple choice is at chance for both, as we saw. G S M 8 K is zero for both: the S F T model learned what a math solution looks like, with tool calls and hash signs, but it can't do the reasoning. And SpellingBee goes from zero to 53 percent. So the Chat Core goes from 0.02 to 0.11, and almost all of that is SpellingBee. And 53 percent is not great, but it's not zero either, and that's exactly where we want to be for the next stage.
+
+Okay, here's an exercise for you. Evaluate the base model on M M L U with a few-shot prompt, using plain text instead of our chat format. How close can you get to the S F T model just by prompting? Pause the video here and give it a try.

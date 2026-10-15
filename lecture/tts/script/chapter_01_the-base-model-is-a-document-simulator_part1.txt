@@ -1,0 +1,15 @@
+Okay so first, let's load up G P T 2 and sample from it. The Engine here is something we'll write ourselves later in the lecture, for now just think of it as a function that samples tokens from the model. And I'm writing a little complete function that takes a prompt, puts the beginning of sequence token in front of it, and samples greedily, so always the most likely next token.
+
+"Hello, I'm a language model, and I'm a programmer." You'll recognize this from the G P T 2 video, it's exactly the same output, so we know the weights are loaded correctly. Now let's ask it a question.
+
+Pause and predict. This model was never trained to answer questions. What will it write after "What is the capital of France?"
+
+Okay, so actually this is not too bad. It does know that the capital of France is Paris. But then it says it again, and again, and again, forever. And I want you to really think about why. This model was trained on web pages. So when it sees a question, it's asking itself, statistically, what text comes next in a web page that starts like this. It's not answering you. It's simulating a document. And documents on the internet don't end after one sentence, so it has no notion of being done.
+
+Now because it's a document simulator, there's actually a fun trick. We can give it the beginning of a document that looks like a conversation with an assistant, and let it continue that document. This is called few-shot prompting.
+
+So look at this. It did pick up on the format, it answers in the voice of the Assistant. The answer is "France", which is wrong, it's a small model. But the much bigger problem is what happens next. It writes the next question from the Human, and then the answer of the Assistant, and so on. It's simulating the whole document, both sides of the conversation, because that's all it knows how to do.
+
+So this tells us three things. Number one, the knowledge is already in there, from pre-training. Number two, the model is perfectly happy to play an assistant, if the document looks like a chat. And number three, it has no idea where its turn ends. And that suggests the whole idea of post-training. Instead of tricking the model with a prompt, we just keep training it, on a lot of documents that are conversations, in some very specific format with clearly marked turns. Then conversations become the kind of document it knows.
+
+Okay, here's an exercise for you. Before we move on, think about how you would do this. If a conversation has to become a single sequence of tokens, what would that sequence look like? And which of those tokens should the model actually be trained on? Pause the video here and give it a try.

@@ -1,0 +1,13 @@
+And the training reward is really noisy, look at step 26. That's because every step only has eight questions, and some steps just get harder words. Always trust a held out evaluation, not the training reward. And one more fun thing. The answers get shorter, from about 210 tokens to about 155. Nobody asked for that. But many long answers were ones where the model got lost, misspelling a word into a long string of garbage letters, and those got zero reward, so RL pushed them down. And with greedy decoding on 100 test questions, SpellingBee goes from 53 percent after S F T to 86 percent after RL.
+
+So now, finally, the famous question. Eight samples from the S F T model and from the RL model, and their final answers.
+
+Before RL, three r's in strawberry only once out of eight. After RL, eight out of eight. Same for cheese. That's RL. But look at the last question, without the quotes and without "the word". Both models fall apart.
+
+Pause and predict. With quotes, the RL model gets strawberry right eight times out of eight. Without them, it falls apart. Why? Hint: think about tokens.
+
+Let's look.
+
+It says: we are asked to find the number of r's in the word "sweet". Sweet! It didn't even copy the right word. And the tokens tell you why. Without quotes, the word is "space strawberry", one single token. With quotes, it's "st", "raw", "berry", exactly the tokens the model has to write in its spelling and in the python call. So with quotes, it just has to copy three tokens. Without quotes, it has to know how one single token is spelled, and write it as a different set of tokens, and it doesn't know that, so it reaches for something nearby in meaning: sweet. Our SpellingBee data mostly has rare words, which are several tokens either way, so the model never learned to unpack a common single-token word. The tokenizer, once again. And the fix is what you'd do in practice: now that we understand the failure, add training data for exactly this case. You look at the failures, you understand them, and you go back and fix the data.
+
+Okay, here's an exercise for you. Write the RL training loop yourself, using the two cells above: a loop over questions, an Adam W optimizer with a small learning rate, and an evaluation of pass at 1 every ten steps. Then try changing the reward, for example a small penalty for long answers, and see what the model does. Careful: RL will find any loophole in your reward. Exercises fourteen to sixteen in the notebook are the pieces you need: pass at k, the log probability of an answer, and the policy gradient loss. Pause the video here and give it a try.

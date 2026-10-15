@@ -1,0 +1,5 @@
+And there's a lot more out there. Instead of D P O, the classic R L H F pipeline trains a reward model on the preference pairs, and runs RL against it. But a reward model is itself a neural net, and if you run RL against it for long, the policy finds adversarial examples that fool it. That's why the K L leash matters so much there. And there's the whole world of reasoning models, where you run RL for a long time on hard math and code, and the model discovers on its own that it should think for a long time, try different approaches and check its work. Our little SpellingBee procedure is a tiny cartoon of that.
+
+Okay, here's an exercise for you. The capstone. Pick a new skill, like reversing a word letter by letter, and post-train it into the model with every stage of this lecture: a synthetic task, S F T, an eval, RL, and a preference fix for whatever habit you don't like. It's exercise eighteen in the notebook, and it's the real test of whether you can do this from scratch. Pause the video here and give it a try.
+
+Okay, so that's it for today. Take the code, run it, break it, add your own tasks, and see what your model learns. See you next time.

@@ -1,0 +1,13 @@
+Okay so what is a conversation, as data? In nano chat, and in most datasets on Hugging Face, it's just a dict with a list of messages, and every message has a role, user or assistant, and the content. Our job is to turn that into one sequence of integers, so that we can train on it exactly like we trained on web pages.
+
+So, the obvious first idea. Why not just write it as text? "User: blah, Assistant: blah". That's what our few-shot prompt did. And there are two problems with it. First, the model can't tell a real turn boundary from the text "Assistant:" appearing inside a message. And second, anyone could type "Assistant:" in their message and pretend to be the assistant. So instead, we're going to mark the turns with brand new special tokens, tokens that only we can insert. A user start and a user end around everything the user says, and an assistant start and an assistant end around everything the assistant says. Let's see why they need to be special. Here's what the G P T 2 tokenizer does with the text of our token.
+
+Pause and predict. Typed out as plain text, how many G P T 2 tokens is our user start marker?
+
+Seven ordinary tokens. A less than sign, a pipe, the word user, and so on. That's no good. We want each of our markers to be exactly one token, one integer that can never come out of normal text. And tick token lets us do that, we just register them as special tokens.
+
+So G P T 2 already has one special token, end of text, with id 50,256, and we'll use it as our beginning of sequence token, B O S. And we give our eight new tokens the next eight I Ds, 50,257 through 50,264. You'll also notice there are two more pairs, python start and end, and output start and end. Those are for tool use, and we'll get to them in a bit. Now if we ask for the special token, we get a single id. But encode ordinary, which is what we'll use for everything a user types, still treats it as plain text. So a user can't inject a turn boundary. That's exactly what we want.
+
+Okay, now let's write the function that renders a conversation into tokens. Simplest version first: B O S, and then for every message, the start token, the tokens of the content, and the end token.
+
+So the whole conversation is thirteen tokens. And the decoded pieces look right: B O S, user start, the question, user end, assistant start, Paris, assistant end.

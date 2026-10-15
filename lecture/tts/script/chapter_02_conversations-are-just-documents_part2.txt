@@ -1,0 +1,13 @@
+Now here's the important question, the one from the exercise. If we train on this sequence like we train on a web page, the model learns to predict every one of these tokens, including the user's question. Is that what we want? Think about it. We don't want a model that simulates users, we want a model that responds to them. Predicting what people ask is not useless, but it's not our job, and with a small model, every bit of capacity matters. So we only want to train on the tokens that the assistant writes. And the way we do that is we return a second list, a mask, with a one for every token the assistant should learn to produce, and a zero for everything else.
+
+So everything the user wrote, and all the special tokens around it, get a zero. The assistant start token also gets a zero, because we always put it there ourselves, the model never has to produce it. Then the content gets a one, and then assistant end also gets a one. And this one is really important. This is how the model learns to stop talking. Remember the base model that went on forever? This is the fix. After Paris, the model must learn to emit assistant end, and then we stop sampling, and it's the user's turn.
+
+Now for tool use. Sometimes we want the assistant to run a bit of python, for example a calculator. So the content of an assistant message can also be a list of parts. A text part is just text. A python part is code that the assistant writes, and we wrap it in python start and python end. And a python output part is the result of running that code, wrapped in output start and output end.
+
+Pause and predict. The model writes the python code, and python writes the output. Which of these tokens should get a mask of one?
+
+The code gets a one, because at test time the model has to write it. But the output gets a zero. At test time, python is going to produce those tokens, not the model. If we trained on them, we would be teaching the model to predict what python would say, in other words to hallucinate tool outputs, and that's actively harmful. And then after the output, the model continues in green, and it can copy the result into its answer.
+
+And one last function. At test time, we have a conversation where it's the assistant's turn. So we render everything except the last assistant message, and then we append assistant start. And that's our prompt. The model takes it from there, and we sample until it emits assistant end.
+
+So the prompt ends with assistant start, and the next token the model writes is the beginning of its answer. Now, I've put exactly this code into the tokenizer file of the repo, and let's just check that our notebook version and the repo version agree.

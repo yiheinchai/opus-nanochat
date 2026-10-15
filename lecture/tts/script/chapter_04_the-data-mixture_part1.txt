@@ -1,0 +1,15 @@
+Okay, now we need conversations to train on. A lot of them. And here's the key idea of the S F T stage in nano chat: the data is a mixture of several datasets, and every one of them teaches the model one specific thing. So let's build them one at a time. And the one I find the most instructive is grade school math, G S M 8 K, so let's start there.
+
+All of these datasets live on Hugging Face, and every dataset on Hugging Face has an automatic export to parquet files. So I wrote a tiny function that downloads those parquet files and reads them with pie arrow. You don't need the datasets library for this. Let's load the G S M 8 K training set and look at one problem.
+
+7,473 problems, each with a question and an answer. And look at the answer. What are these things in double angle brackets? These are calculator annotations, from the people who made the dataset. "12 times 2 equals 24" is written out as the expression and its result. And at the very end, after four hash signs, is the final answer, which is what we'll use for grading.
+
+So here's the plan. These calculator annotations are a gift. They're exactly the tool calls that we want our model to learn. So we're going to turn every one of them into a python part, followed by a python output part. Step one, let's split the answer into the text and the annotations. A regex split with a capture group keeps the separators, so we get both.
+
+So we get the plain text, then the annotation, then text again, alternating. Step two, for every annotation, we strip the angle brackets and split at the last equals sign. Left of it is the expression, which becomes a python part, and right of it is the result, which becomes a python output part. Everything else is a text part. And then we can render it with our own render conversation and look at the mask.
+
+So the model is trained to write the expression, in green, the result is red, it will come from python, and then the model copies the result into its sentence. This is the simplest possible version of tool use. The model learns to hand the arithmetic, which it's bad at, to a calculator, which is perfect at it. And at the end, the four hash signs and the answer. Now to grade an answer, we just pull out the number after the hash signs, with a regex, and compare it to the reference.
+
+So 42 for our problem, commas get removed so 1,024 becomes 1024, and None when there's no answer at all. That's it, that's our grader. And notice that this grader is going to be our reward in reinforcement learning, at the end of the lecture.
+
+The second dataset is M M L U, which is multiple choice questions. And it teaches the model the format of multiple choice, which is how we'll evaluate it later. Let's write the function that renders a multiple choice question, and I'll show you two little details in it.

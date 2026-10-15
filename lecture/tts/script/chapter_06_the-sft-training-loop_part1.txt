@@ -1,0 +1,17 @@
+Okay, and now the punchline of this whole stage. S F T is literally just pre-training with a different dataloader. Same model, same cross entropy loss, same Adam W optimizer, same training loop. The only differences are the minus ones in the targets, and a gentler learning rate. The model already knows a lot, we're just nudging its statistics, so we use a smaller learning rate than in pre-training, keep it constant for the first half, and then decay it to zero.
+
+Constant for the first half, then down to zero at the end. That's the schedule nano chat uses. And now, let's actually train, right here in the notebook. A fresh copy of G P T 2, Adam W, our dataloader with small rows of 256 tokens, and the training loop you've written ten times by now.
+
+And the loss is going down. From 3.4 to 1.6 in eight steps. And notice how the number of trained tokens jumps around from batch to batch, that's because every batch has a different mix of conversations, so the loss of a single step is noisy.
+
+So that's S F T. Everything else is engineering. I've put the dataloader, the schedule and the loop into chat S F T dot pie, plus command line arguments, a validation loss every hundred steps, gradient accumulation, B float 16 and torch compile on a GPU, and saving the checkpoint at the end. In nano chat, you do one full epoch over the whole mixture, which on a single A 100 is something like half an hour. But to show you that you don't need a GPU, I ran a smaller version on a plain four core CPU. 600 steps of four rows of 512 tokens, about an hour and a half.
+
+Now look at the very first step. A loss of 11.9. Why so much higher than in our notebook run? Look at the number of trained tokens. Eight. In the whole first batch!
+
+Pause and predict. Why would the very first batch have only eight tokens to train on? Think about what best fit grabs first.
+
+It's best fit. At the start, the buffer is full, and the longest conversations in it are those long M M L U reading passages. So every row is one of them, and each one has exactly two green tokens, the letter and assistant end. And assistant end is one of our special tokens, the ones that start out with a loss of 15. Then in step two there are 428 trained tokens, and the loss is a normal 2.6. So the loss of a single step can be really misleading, and that's why we look at the validation loss, which goes down smoothly, from 2.73 to 1.34.
+
+Okay, now the fun part. Let's talk to it. Here's a little chat function: it puts the question in a conversation, renders it for completion, and samples until assistant end.
+
+"Hello! How can I help you today?" And then it stopped. All by itself, it emitted assistant end. Compare that to the base model, which kept going forever. So the format, the turn taking, that's learned. Let's ask about France.

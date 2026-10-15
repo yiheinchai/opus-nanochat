@@ -1,0 +1,19 @@
+Okay, so now we need to turn conversations into batches. And in the pre-training videos this was trivial. We had one endless stream of text, and we just chopped it into rows of 1024 tokens. A document cut in half, who cares. But a conversation is different. If you cut it in half, you get a question without its answer, and an answer without its question. So we want every conversation in one piece, and we want every row to start with a B O S token, because that's what the model will see at test time.
+
+So the first question is, how long are conversations? Let's measure.
+
+Half of them are shorter than about 200 tokens. But there's a long tail, ten percent are over a thousand tokens, and the longest is 20,000. And with the rows of 512 tokens we're going to use on the CPU, one in five conversations won't fit. Keep that number in mind.
+
+Okay so the simplest thing we could do is one conversation per row, and fill up the rest of the row with padding. And we don't train on the padding, so it gets a mask of zero. Let's measure how much of the batch is wasted.
+
+Pause and predict. Half the conversations are shorter than about 200 tokens, and the rows are 512. What fraction of a naive batch is padding?
+
+47 percent of every batch is padding. Half of our compute would be spent on nothing. And only a quarter of the tokens are actually trained on. That's terrible.
+
+So the better idea is packing. We put several whole conversations into every row. And the algorithm nano chat uses is called best fit. We keep a buffer of a hundred conversations, and to fill a row, we keep grabbing the longest conversation in the buffer that still fits in the space that's left. And only when nothing fits anymore, we pad the rest of the row. Long conversations go first, and the short ones fill in the gaps. And we never cut a conversation.
+
+But before I show you the code, I want to tell you about a bug I hit writing this, because it's really instructive. In my first version, I rendered every conversation with max tokens set to the row length, so long conversations just got truncated. Seems harmless, right? Let's see what that does to a long multiple choice question.
+
+Pause and predict. A long multiple choice question gets cut off at 513 tokens. How many of its tokens will we train on?
+
+513 tokens, and a mask that sums to zero. Not a single trainable token! These M M L U training questions include long reading passages, and the answer, the one green token, is at the very end. So truncation cut off the answer, and the whole conversation became prompt. And here's the evil part. The best fit algorithm loves these, because they're exactly the length of a row. So it filled whole batches with them, and the loss on a batch with zero trainable tokens is zero divided by zero, which is not a number. My loss was NaN, and it took me a minute to figure out why. So the fix is simple: if a conversation doesn't fit in a row, we skip it. Okay, now let's write the real thing.

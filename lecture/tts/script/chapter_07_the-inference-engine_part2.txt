@@ -1,0 +1,13 @@
+Pause and predict. What should happen when the model emits python end, and what should the model see next?
+
+Here's the idea. When we sample python start, we start recording the tokens. When we sample python end, we decode the recorded tokens into a string, and we run it. And then here's the trick. We put output start, the tokens of the result, and output end into a queue, and on the next steps, instead of using what the model sampled, we take tokens from the queue. We force them in. So the result appears in the model's own context, as if it had written it, and then it just continues from there. Let's write it.
+
+So every step, if there are forced tokens waiting, we take one, otherwise we use the model's choice. On python start we start recording, on python end we run it, and we queue up the result. And let's try it on our S F T model, on a spelling question it has never seen. So look at what happens. It spells the word, and it gets the spelling wrong! e, y, u, r. It roughly knows which letters are in there, but not in which order, because remember, it never sees the letters. Then it counts the u's in its own misspelled version and gets one, which happens to be right. Then it writes the python call, and in the python call it copies the word perfectly, because copying tokens is easy. And our code runs it and forces in the result. And the final answer is one. So the tool is robust to the model's own sloppiness.
+
+Now, a word about safety. We're running code that a neural network wrote, so the calculator is deliberately very restricted. It allows numbers and arithmetic, without powers, or the count method of a string, and it evaluates without any builtins.
+
+So arithmetic and counting work, and an attempt to run a shell command, or to compute a gigantic number, just returns None. Never give a language model an unrestricted eval on your machine.
+
+And the Engine in the repo is exactly what we just wrote, but for a whole batch of samples at once, with every row keeping its own little state, the pre-fill once and copy trick, and one more thing: it returns a mask, one for tokens the model sampled, and zero for tokens that were forced in. Remember that mask, because we'll need it for reinforcement learning. Let's sample eight answers to the same question.
+
+Every sample has three forced tokens, output start, the result, and output end, and they come out with different lengths, because we sampled with a temperature.
