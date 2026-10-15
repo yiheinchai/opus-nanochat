@@ -379,7 +379,7 @@ def layout(screen):
     output = ansi_lines(screen["output"]) if screen.get("output") else []
     height = (H - 30) - 100
     for size in range(26, MIN_FONT - 1, -1):
-        max_chars = int((W - 140) / draw.textlength("x", font=font(size, mono=True)))
+        max_chars = int((CONTENT_W - 120) / draw.textlength("x", font=font(size, mono=True)))
         code_w, out_w = wrap(code, max_chars), wrap(output, max_chars)
         line_h = int(size * 1.4)
         if len(code_w) * line_h + 40 + (len(out_w) * line_h + 70 if out_w else 0) <= height:
@@ -396,6 +396,23 @@ def layout(screen):
     return size, pages
 
 MIN_FONT = 18
+CONTENT_W = W - 460 # the right column is the sidebar: the lecture outline, and the teacher's "webcam"
+AVATAR_XY = (CONTENT_W + 30, H - 450 - 20)
+CHAPTERS = [] # filled in by build_video
+
+def draw_sidebar(draw, chapter):
+    draw.rectangle([CONTENT_W, 0, W, H], fill="#f4f5f7")
+    draw.line([CONTENT_W, 0, CONTENT_W, H], fill=COLORS["border"], width=2)
+    x, y = CONTENT_W + 30, 36
+    draw.text((x, y), "LECTURE OUTLINE", font=font(20, bold=True), fill=COLORS["muted"], anchor="lm")
+    for i, name in enumerate(CHAPTERS):
+        current = name == chapter
+        text = f"{i}. {name}" if i > 0 else name
+        fnt = font(19, bold=current)
+        while draw.textlength(text, font=fnt) > W - x - 20:
+            text = text[:-2].rstrip() + "…"
+        draw.text((x, y + 44 + 45 * i), text, font=fnt, fill=COLORS["accent"] if current else COLORS["text"], anchor="lm")
+    draw.rectangle([AVATAR_XY[0], AVATAR_XY[1], AVATAR_XY[0] + 400, AVATAR_XY[1] + 450], fill="#262b36") # the teacher goes here
 
 def render_screen(screen, chapter, path, page=0):
     from PIL import Image, ImageDraw
@@ -403,27 +420,29 @@ def render_screen(screen, chapter, path, page=0):
     draw = ImageDraw.Draw(img)
     if screen["kind"] in ("title", "chapter", "exercise"):
         if screen["kind"] == "exercise":
-            draw.text((W // 2, 360), "Exercise: pause the video and try it yourself", font=font(54, bold=True), fill=COLORS["accent"], anchor="mm")
-            body = textwrap.wrap(screen["text"], 70)
+            draw.text((CONTENT_W // 2, 360), "Exercise: pause the video and try it yourself", font=font(48, bold=True), fill=COLORS["accent"], anchor="mm")
+            body = textwrap.wrap(screen["text"], 58)
             for j, line in enumerate(body):
-                draw.text((W // 2, 480 + 56 * j), line, font=font(38), fill=COLORS["text"], anchor="mm")
+                draw.text((CONTENT_W // 2, 470 + 54 * j), line, font=font(36), fill=COLORS["text"], anchor="mm")
         else:
             subtitle = "nanochat post-training, from scratch" if screen["kind"] == "title" else screen.get("number", "")
-            size = 64 if screen["kind"] == "title" else 76
-            for j, line in enumerate(textwrap.wrap(screen["text"], 42)):
-                draw.text((W // 2, 440 + (size + 20) * j), line, font=font(size, bold=True), fill=COLORS["text"], anchor="mm")
-            draw.text((W // 2, 340), subtitle, font=font(36), fill=COLORS["muted"], anchor="mm")
+            size = 60 if screen["kind"] == "title" else 68
+            for j, line in enumerate(textwrap.wrap(screen["text"], 34)):
+                draw.text((CONTENT_W // 2, 440 + (size + 20) * j), line, font=font(size, bold=True), fill=COLORS["text"], anchor="mm")
+            draw.text((CONTENT_W // 2, 340), subtitle, font=font(36), fill=COLORS["muted"], anchor="mm")
+        draw_sidebar(draw, chapter)
         img.save(path)
         return
     size, pages = layout(screen)
     code_w, out_w = pages[page]
     fnt, line_h = font(size, mono=True), int(size * 1.4)
     # header
-    draw.rectangle([0, 0, W, 72], fill=COLORS["header"])
+    draw.rectangle([0, 0, CONTENT_W, 72], fill=COLORS["header"])
     draw.text((40, 36), chapter, font=font(30, bold=True), fill=COLORS["text"], anchor="lm")
     label = screen.get("label", "") + (f"  ({page + 1}/{len(pages)})" if len(pages) > 1 else "")
-    draw.text((W - 40, 36), label, font=font(26, mono=True), fill=COLORS["muted"], anchor="rm")
-    left, right, y = 50, W - 50, 100
+    draw.text((CONTENT_W - 30, 36), label, font=font(26, mono=True), fill=COLORS["muted"], anchor="rm")
+    draw_sidebar(draw, chapter)
+    left, right, y = 40, CONTENT_W - 30, 100
     code_bottom = y + len(code_w) * line_h + 40
     draw.rectangle([left, y, right, code_bottom], fill=COLORS["codebg"], outline=COLORS["border"])
     draw_lines(draw, code_w, left + 20, y + 20, fnt, line_h)
@@ -433,8 +452,10 @@ def render_screen(screen, chapter, path, page=0):
         draw_lines(draw, out_w, left + 20, y + 20, fnt, line_h)
     img.save(path)
 
-def build_video(blocks, tts, voice):
+def build_video(blocks, tts, voice, teacher=True):
+    import avatar
     outputs = notebook_outputs()
+    CHAPTERS[:] = [b["text"] for b in blocks if b["type"] == "chapter"]
     frames_dir = os.path.join(BUILD, "frames")
     os.makedirs(frames_dir, exist_ok=True)
     timeline = [] # dicts of: screen, audio path (or None for silence), seconds, subtitle text
@@ -444,7 +465,8 @@ def build_video(blocks, tts, voice):
             screen = {"kind": "title", "text": b["text"]}
         elif b["type"] == "chapter":
             chapter, chapter_number = b["text"], chapter_number + 1
-            screen = {"kind": "chapter", "text": b["text"], "number": f"Chapter {chapter_number - 1}" if chapter_number > 1 else ""}
+            if not (screen and screen["kind"] == "title"): # the intro keeps the lecture's title card
+                screen = {"kind": "chapter", "text": b["text"], "number": f"Chapter {chapter_number - 1}" if chapter_number > 1 else ""}
             timeline.append({"screen": screen, "chapter": chapter, "seconds": 1.5})
         elif b["type"] in ("code", "bash"):
             language = "python" if b["type"] == "code" else "bash"
@@ -512,11 +534,24 @@ def build_video(blocks, tts, voice):
         f.write(f"file '{frames[-1][0]}'\n") # the concat demuxer needs the last frame twice
     with open(os.path.join(BUILD, "lecture.srt"), "w", encoding="utf-8") as f:
         f.write("\n".join(srt))
+    # the teacher: a lip-synced sprite track, overlaid in the bottom right corner
+    fps = 25
+    track = avatar.build_track([(e.get("audio"), e["seconds"]) for e in timeline], fps, os.path.join(BUILD, "sprites"))
+    with open(os.path.join(BUILD, "teacher.txt"), "w") as f:
+        for sprite, seconds in track:
+            f.write(f"file '{sprite}'\nduration {seconds:.4f}\n")
+        f.write(f"file '{track[-1][0]}'\n")
     out = os.path.join(BUILD, "lecture.mp4")
-    subprocess.run(["ffmpeg", "-y", "-loglevel", "error",
-                    "-f", "concat", "-safe", "0", "-i", os.path.join(BUILD, "frames.txt"),
-                    "-f", "concat", "-safe", "0", "-i", os.path.join(BUILD, "audio.txt"),
-                    "-vf", "fps=10,format=yuv420p", "-c:v", "libx264", "-preset", "medium", "-tune", "stillimage",
+    inputs = ["-f", "concat", "-safe", "0", "-i", os.path.join(BUILD, "frames.txt"),
+              "-f", "concat", "-safe", "0", "-i", os.path.join(BUILD, "audio.txt")]
+    if teacher:
+        inputs += ["-f", "concat", "-safe", "0", "-i", os.path.join(BUILD, "teacher.txt")]
+        video = ["-filter_complex", f"[0:v]fps={fps}[bg];[2:v]fps={fps}[t];[bg][t]overlay={AVATAR_XY[0]}:{AVATAR_XY[1]},format=yuv420p[v]",
+                 "-map", "[v]", "-map", "1:a"]
+    else:
+        video = ["-vf", "fps=10,format=yuv420p", "-map", "0:v", "-map", "1:a"]
+    subprocess.run(["ffmpeg", "-y", "-loglevel", "error", *inputs, *video,
+                    "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
                     "-c:a", "aac", "-b:a", "160k", "-shortest", out], check=True)
     print(f"wrote {out} ({t / 60:.1f} minutes) and lecture.srt")
 
@@ -548,6 +583,7 @@ if __name__ == "__main__":
     parser.add_argument("--tts", choices=list(BACKENDS), default="kokoro", help="text-to-speech backend")
     parser.add_argument("--voice", default=None, help="voice for the backend (default: kokoro am_michael, ElevenLabs George)")
     parser.add_argument("--chapters", type=int, default=None, help="only the first N chapters (for a quick preview)")
+    parser.add_argument("--no-teacher", action="store_true", help="leave out the animated teacher")
     args = parser.parse_args()
     voice = args.voice or os.environ.get("ELEVENLABS_VOICE_ID" if args.tts == "elevenlabs" else "TTS_VOICE") or BACKENDS[args.tts][0]
     blocks = parse()
@@ -564,4 +600,4 @@ if __name__ == "__main__":
     if args.step in ("audio", "all"):
         build_audio(blocks, args.tts, voice)
     if args.step in ("video", "all"):
-        build_video(blocks, args.tts, voice)
+        build_video(blocks, args.tts, voice, teacher=not args.no_teacher)
