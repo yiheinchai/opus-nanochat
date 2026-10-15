@@ -1,0 +1,3563 @@
+1
+00:00:01,500 --> 00:00:02,292
+Hi everyone.
+
+2
+00:00:02,292 --> 00:00:08,037
+So today we are going to continue where Andrej Karpathy's Zero to Hero series left off.
+
+3
+00:00:08,037 --> 00:00:13,649
+If you've been following along, you've built micrograd, you've built makemore, you've
+
+4
+00:00:13,649 --> 00:00:19,526
+built a GPT from scratch on tiny Shakespeare, and in the last video you reproduced GPT-2,
+
+5
+00:00:19,526 --> 00:00:21,771
+the 124 million parameter version.
+
+6
+00:00:21,771 --> 00:00:25,006
+And at the end of all that, you had a base model.
+
+7
+00:00:25,006 --> 00:00:27,053
+A thing that can continue text.
+
+8
+00:00:27,053 --> 00:00:31,873
+But if you actually try to talk to it, you'll find that it's not ChatGPT.
+
+9
+00:00:31,873 --> 00:00:33,326
+It's not an assistant.
+
+10
+00:00:33,326 --> 00:00:34,911
+It just sort of babbles.
+
+11
+00:00:34,911 --> 00:00:38,888
+So the question for today is: what happens after pretraining?
+
+12
+00:00:38,888 --> 00:00:44,757
+How do you go from a base model, an internet document simulator, to something that you can
+
+13
+00:00:44,757 --> 00:00:50,430
+actually talk to, that answers your questions, that uses tools, and that can even count
+
+14
+00:00:50,430 --> 00:00:52,517
+the number of r's in strawberry?
+
+15
+00:00:52,517 --> 00:00:57,929
+This stage is called post-training, and today we are going to build all of it, from
+
+16
+00:00:57,929 --> 00:01:01,190
+scratch, following Karpathy's nanochat repository.
+
+17
+00:01:01,190 --> 00:01:06,014
+Now here is my goal for this video, and I want to be very explicit about it.
+
+18
+00:01:06,014 --> 00:01:11,663
+When you're done, you should be able to reproduce every piece of nanochat's post-training
+
+19
+00:01:11,663 --> 00:01:13,314
+yourself, without looking.
+
+20
+00:01:13,314 --> 00:01:18,645
+Not just know the words, but have typed every line, and understand why every line is
+
+21
+00:01:18,645 --> 00:01:19,026
+there.
+
+22
+00:01:19,026 --> 00:01:23,343
+So we're going to do this the same way as in the rest of the series.
+
+23
+00:01:23,343 --> 00:01:28,738
+We'll start from a problem, try the most obvious thing, see it fail, and then fix it.
+
+24
+00:01:28,738 --> 00:01:34,260
+Every piece of code gets written in the notebook first and tested on tiny examples, and
+
+25
+00:01:34,260 --> 00:01:39,910
+only at the end of each chapter will we look at the file in the repository, which will be
+
+26
+00:01:39,910 --> 00:01:41,941
+the exact same code, cleaned up.
+
+27
+00:01:41,941 --> 00:01:43,466
+Here's what you need.
+
+28
+00:01:43,466 --> 00:01:49,639
+You need the base model from the GPT-2 video, and I've put that model, with two small
+
+29
+00:01:49,639 --> 00:01:54,215
+additions that we'll write together today, in this gpt.py file.
+
+30
+00:01:54,215 --> 00:02:00,679
+It's the same code, the token embeddings, the position embeddings, the twelve transformer
+
+31
+00:02:00,679 --> 00:02:05,181
+blocks, the language model head, with the same weight sharing.
+
+32
+00:02:05,181 --> 00:02:11,427
+And we'll load the original OpenAI weights into it, exactly like we did in that video.
+
+33
+00:02:11,427 --> 00:02:17,891
+Pretraining is the expensive part of the pipeline, it needs a node of eight H100 GPUs for
+
+34
+00:02:17,891 --> 00:02:19,198
+a couple of hours.
+
+35
+00:02:19,198 --> 00:02:25,662
+But post-training is cheap, and everything today runs on a laptop CPU, or on a free Colab
+
+36
+00:02:25,662 --> 00:02:27,551
+GPU if you want it faster.
+
+37
+00:02:27,551 --> 00:02:28,991
+So here is the roadmap.
+
+38
+00:02:28,991 --> 00:02:32,311
+First, we'll look at what a base model actually does.
+
+39
+00:02:32,311 --> 00:02:36,132
+Then we'll figure out how to turn a conversation into tokens.
+
+40
+00:02:36,132 --> 00:02:41,770
+Then we'll build a mixture of training data, a dataloader for it, and we'll run supervised
+
+41
+00:02:41,770 --> 00:02:42,459
+finetuning.
+
+42
+00:02:42,459 --> 00:02:47,846
+Then we'll write an inference engine with a KV cache and a python tool, evaluations to
+
+43
+00:02:47,846 --> 00:02:53,233
+measure what we did, and finally reinforcement learning, where the model practices and
+
+44
+00:02:53,233 --> 00:02:55,926
+learns from its own successes and failures.
+
+45
+00:02:55,926 --> 00:02:57,618
+Okay, so let's get started.
+
+46
+00:02:59,118 --> 00:03:02,635
+Okay so first, let's load up GPT-2 and sample from it.
+
+47
+00:03:02,635 --> 00:03:08,171
+The Engine here is something we'll write ourselves later in the lecture, for now just
+
+48
+00:03:08,171 --> 00:03:12,144
+think of it as a function that samples tokens from the model.
+
+49
+00:03:12,144 --> 00:03:17,680
+And I'm writing a little complete function that takes a prompt, puts the beginning of
+
+50
+00:03:17,680 --> 00:03:23,542
+sequence token in front of it, and samples greedily, so always the most likely next token.
+
+51
+00:03:24,542 --> 00:03:30,859
+"Hello, I'm a language model, and I'm a programmer." You'll recognize this from the GPT-2
+
+52
+00:03:30,859 --> 00:03:36,609
+video, it's exactly the same output, so we know the weights are loaded correctly.
+
+53
+00:03:36,609 --> 00:03:38,596
+Now let's ask it a question.
+
+54
+00:03:39,596 --> 00:03:42,169
+Okay, so actually this is not too bad.
+
+55
+00:03:42,169 --> 00:03:45,487
+It does know that the capital of France is Paris.
+
+56
+00:03:45,487 --> 00:03:49,347
+But then it says it again, and again, and again, forever.
+
+57
+00:03:49,347 --> 00:03:52,123
+And I want you to really think about why.
+
+58
+00:03:52,123 --> 00:03:54,560
+This model was trained on web pages.
+
+59
+00:03:54,560 --> 00:04:00,519
+So when it sees a question, it's asking itself, statistically, what text comes next in a
+
+60
+00:04:00,519 --> 00:04:02,618
+web page that starts like this.
+
+61
+00:04:02,618 --> 00:04:04,176
+It's not answering you.
+
+62
+00:04:04,176 --> 00:04:06,004
+It's simulating a document.
+
+63
+00:04:06,004 --> 00:04:11,963
+And documents on the internet don't end after one sentence, so it has no notion of being
+
+64
+00:04:11,963 --> 00:04:12,301
+done.
+
+65
+00:04:12,301 --> 00:04:16,921
+Now because it's a document simulator, there's actually a fun trick.
+
+66
+00:04:16,921 --> 00:04:22,424
+We can give it the beginning of a document that looks like a conversation with an
+
+67
+00:04:22,424 --> 00:04:25,482
+assistant, and let it continue that document.
+
+68
+00:04:25,482 --> 00:04:27,792
+This is called few-shot prompting.
+
+69
+00:04:28,792 --> 00:04:29,812
+So look at this.
+
+70
+00:04:29,812 --> 00:04:34,337
+It did pick up on the format, it answers in the voice of the Assistant.
+
+71
+00:04:34,337 --> 00:04:38,097
+The answer is "France", which is wrong, it's a small model.
+
+72
+00:04:38,097 --> 00:04:41,220
+But the much bigger problem is what happens next.
+
+73
+00:04:41,220 --> 00:04:46,829
+It writes the next question from the Human, and then the answer of the Assistant, and so
+
+74
+00:04:46,829 --> 00:04:47,020
+on.
+
+75
+00:04:47,020 --> 00:04:52,693
+It's simulating the whole document, both sides of the conversation, because that's all it
+
+76
+00:04:52,693 --> 00:04:53,713
+knows how to do.
+
+77
+00:04:53,713 --> 00:04:55,634
+So this tells us three things.
+
+78
+00:04:55,634 --> 00:04:59,733
+Number one, the knowledge is already in there, from pretraining.
+
+79
+00:04:59,733 --> 00:05:05,434
+Number two, the model is perfectly happy to play an assistant, if the document looks like
+
+80
+00:05:05,434 --> 00:05:05,882
+a chat.
+
+81
+00:05:05,882 --> 00:05:09,277
+And number three, it has no idea where its turn ends.
+
+82
+00:05:09,277 --> 00:05:12,479
+And that suggests the whole idea of post-training.
+
+83
+00:05:12,479 --> 00:05:17,731
+Instead of tricking the model with a prompt, we just keep training it, on a lot of
+
+84
+00:05:17,731 --> 00:05:23,432
+documents that are conversations, in some very specific format with clearly marked turns.
+
+85
+00:05:23,432 --> 00:05:27,019
+Then conversations become the kind of document it knows.
+
+86
+00:05:27,019 --> 00:05:31,656
+Exercise: Before we move on, think about how you would do this.
+
+87
+00:05:31,656 --> 00:05:38,281
+If a conversation has to become a single sequence of tokens, what would that sequence look
+
+88
+00:05:38,281 --> 00:05:38,649
+like?
+
+89
+00:05:38,649 --> 00:05:43,507
+And which of those tokens should the model actually be trained on?
+
+90
+00:05:43,507 --> 00:05:46,010
+Pause the video and give it a try.
+
+91
+00:05:49,510 --> 00:05:52,422
+Okay so what is a conversation, as data?
+
+92
+00:05:52,422 --> 00:05:58,318
+In nanochat, and in most datasets on HuggingFace, it's just a dict with a list of
+
+93
+00:05:58,318 --> 00:06:03,777
+messages, and every message has a role, user or assistant, and the content.
+
+94
+00:06:03,777 --> 00:06:10,256
+Our job is to turn that into one sequence of integers, so that we can train on it exactly
+
+95
+00:06:10,256 --> 00:06:12,367
+like we trained on web pages.
+
+96
+00:06:12,367 --> 00:06:14,143
+So, the obvious first idea.
+
+97
+00:06:14,143 --> 00:06:16,116
+Why not just write it as text?
+
+98
+00:06:16,116 --> 00:06:18,089
+"User: blah, Assistant: blah".
+
+99
+00:06:18,089 --> 00:06:20,457
+That's what our few-shot prompt did.
+
+100
+00:06:20,457 --> 00:06:22,759
+And there are two problems with it.
+
+101
+00:06:22,759 --> 00:06:28,350
+First, the model can't tell a real turn boundary from the text "Assistant:" appearing
+
+102
+00:06:28,350 --> 00:06:29,468
+inside a message.
+
+103
+00:06:29,468 --> 00:06:34,796
+And second, anyone could type "Assistant:" in their message and pretend to be the
+
+104
+00:06:34,796 --> 00:06:35,454
+assistant.
+
+105
+00:06:35,454 --> 00:06:41,308
+So instead, we're going to mark the turns with brand new special tokens, tokens that only
+
+106
+00:06:41,308 --> 00:06:42,229
+we can insert.
+
+107
+00:06:42,229 --> 00:06:48,148
+A user start and a user end around everything the user says, and an assistant start and an
+
+108
+00:06:48,148 --> 00:06:51,503
+assistant end around everything the assistant says.
+
+109
+00:06:51,503 --> 00:06:54,002
+Let's see why they need to be special.
+
+110
+00:06:54,002 --> 00:06:58,212
+Here's what the GPT-2 tokenizer does with the text of our token.
+
+111
+00:06:59,212 --> 00:07:00,859
+Seven ordinary tokens.
+
+112
+00:07:00,859 --> 00:07:04,677
+A less than sign, a pipe, the word user, and so on.
+
+113
+00:07:04,677 --> 00:07:05,800
+That's no good.
+
+114
+00:07:05,800 --> 00:07:12,388
+We want each of our markers to be exactly one token, one integer that can never come out
+
+115
+00:07:12,388 --> 00:07:13,511
+of normal text.
+
+116
+00:07:13,511 --> 00:07:18,751
+And tiktoken lets us do that, we just register them as special tokens.
+
+117
+00:07:19,751 --> 00:07:26,712
+So GPT-2 already has one special token, end of text, with id 50,256, and we'll use it as
+
+118
+00:07:26,712 --> 00:07:29,639
+our beginning of sequence token, BOS.
+
+119
+00:07:29,639 --> 00:07:35,571
+And we give our eight new tokens the next eight ids, 50,257 through 50,264.
+
+120
+00:07:35,571 --> 00:07:42,453
+You'll also notice there are two more pairs, python start and end, and output start and
+
+121
+00:07:42,453 --> 00:07:42,769
+end.
+
+122
+00:07:42,769 --> 00:07:47,119
+Those are for tool use, and we'll get to them in a bit.
+
+123
+00:07:47,119 --> 00:07:51,549
+Now if we ask for the special token, we get a single id.
+
+124
+00:07:51,549 --> 00:07:58,589
+But encode_ordinary, which is what we'll use for everything a user types, still treats it
+
+125
+00:07:58,589 --> 00:07:59,696
+as plain text.
+
+126
+00:07:59,696 --> 00:08:02,781
+So a user can't inject a turn boundary.
+
+127
+00:08:02,781 --> 00:08:04,996
+That's exactly what we want.
+
+128
+00:08:04,996 --> 00:08:10,660
+Okay, now let's write the function that renders a conversation into tokens.
+
+129
+00:08:10,660 --> 00:08:17,231
+Simplest version first: BOS, and then for every message, the start token, the tokens of
+
+130
+00:08:17,231 --> 00:08:19,572
+the content, and the end token.
+
+131
+00:08:20,572 --> 00:08:24,210
+So the whole conversation is thirteen tokens.
+
+132
+00:08:24,210 --> 00:08:31,082
+And the decoded pieces look right: BOS, user start, the question, user end, assistant
+
+133
+00:08:31,082 --> 00:08:33,346
+start, Paris, assistant end.
+
+134
+00:08:33,346 --> 00:08:37,316
+Now here's the important question, the one from the exercise.
+
+135
+00:08:37,316 --> 00:08:42,849
+If we train on this sequence like we train on a web page, the model learns to predict
+
+136
+00:08:42,849 --> 00:08:46,559
+every one of these tokens, including the user's question.
+
+137
+00:08:46,559 --> 00:08:47,925
+Is that what we want?
+
+138
+00:08:47,925 --> 00:08:48,902
+Think about it.
+
+139
+00:08:48,902 --> 00:08:54,239
+We don't want a model that simulates users, we want a model that responds to them.
+
+140
+00:08:54,239 --> 00:08:59,967
+Predicting what people ask is not useless, but it's not our job, and with a small model,
+
+141
+00:08:59,967 --> 00:09:01,919
+every bit of capacity matters.
+
+142
+00:09:01,919 --> 00:09:06,150
+So we only want to train on the tokens that the assistant writes.
+
+143
+00:09:06,150 --> 00:09:11,943
+And the way we do that is we return a second list, a mask, with a one for every token the
+
+144
+00:09:11,943 --> 00:09:16,239
+assistant should learn to produce, and a zero for everything else.
+
+145
+00:09:17,239 --> 00:09:22,553
+So everything the user wrote, and all the special tokens around it, get a zero.
+
+146
+00:09:22,553 --> 00:09:28,540
+The assistant start token also gets a zero, because we always put it there ourselves, the
+
+147
+00:09:28,540 --> 00:09:30,558
+model never has to produce it.
+
+148
+00:09:30,558 --> 00:09:35,132
+Then the content gets a one, and then assistant end also gets a one.
+
+149
+00:09:35,132 --> 00:09:37,351
+And this one is really important.
+
+150
+00:09:37,351 --> 00:09:40,378
+This is how the model learns to stop talking.
+
+151
+00:09:40,378 --> 00:09:43,405
+Remember the base model that went on forever?
+
+152
+00:09:43,405 --> 00:09:44,482
+This is the fix.
+
+153
+00:09:44,482 --> 00:09:50,334
+After Paris, the model must learn to emit assistant end, and then we stop sampling, and
+
+154
+00:09:50,334 --> 00:09:51,747
+it's the user's turn.
+
+155
+00:09:51,747 --> 00:09:52,846
+Now for tool use.
+
+156
+00:09:52,846 --> 00:09:58,084
+Sometimes we want the assistant to run a bit of python, for example a calculator.
+
+157
+00:09:58,084 --> 00:10:02,417
+So the content of an assistant message can also be a list of parts.
+
+158
+00:10:02,417 --> 00:10:04,033
+A text part is just text.
+
+159
+00:10:04,033 --> 00:10:09,853
+A python part is code that the assistant writes, and we wrap it in python start and python
+
+160
+00:10:09,853 --> 00:10:10,112
+end.
+
+161
+00:10:10,112 --> 00:10:15,803
+And a python output part is the result of running that code, wrapped in output start and
+
+162
+00:10:15,803 --> 00:10:16,514
+output end.
+
+163
+00:10:16,514 --> 00:10:18,778
+Now pause and think about the mask.
+
+164
+00:10:18,778 --> 00:10:20,847
+Which of these should get a one?
+
+165
+00:10:21,847 --> 00:10:26,233
+The code gets a one, because at test time the model has to write it.
+
+166
+00:10:26,233 --> 00:10:27,975
+But the output gets a zero.
+
+167
+00:10:27,975 --> 00:10:32,425
+At test time, python is going to produce those tokens, not the model.
+
+168
+00:10:32,425 --> 00:10:38,230
+If we trained on them, we would be teaching the model to predict what python would say, in
+
+169
+00:10:38,230 --> 00:10:42,681
+other words to hallucinate tool outputs, and that's actively harmful.
+
+170
+00:10:42,681 --> 00:10:48,357
+And then after the output, the model continues in green, and it can copy the result into
+
+171
+00:10:48,357 --> 00:10:49,067
+its answer.
+
+172
+00:10:49,067 --> 00:10:50,602
+And one last function.
+
+173
+00:10:50,602 --> 00:10:55,417
+At test time, we have a conversation where it's the assistant's turn.
+
+174
+00:10:55,417 --> 00:11:01,488
+So we render everything except the last assistant message, and then we append assistant
+
+175
+00:11:01,488 --> 00:11:01,907
+start.
+
+176
+00:11:01,907 --> 00:11:03,442
+And that's our prompt.
+
+177
+00:11:03,442 --> 00:11:08,606
+The model takes it from there, and we sample until it emits assistant end.
+
+178
+00:11:09,606 --> 00:11:15,249
+So the prompt ends with assistant start, and the next token the model writes is the
+
+179
+00:11:15,249 --> 00:11:16,880
+beginning of its answer.
+
+180
+00:11:16,880 --> 00:11:22,930
+Now, I've put exactly this code into the tokenizer file of the repo, and let's just check
+
+181
+00:11:22,930 --> 00:11:26,533
+that our notebook version and the repo version agree.
+
+182
+00:11:27,533 --> 00:11:27,899
+Good.
+
+183
+00:11:27,899 --> 00:11:34,262
+The repo version, in tokenizer.py, is the same function, with two small additions: if a
+
+184
+00:11:34,262 --> 00:11:40,625
+conversation starts with a system message, we just glue it onto the first user message,
+
+185
+00:11:40,625 --> 00:11:44,793
+because we don't have special tokens for system messages.
+
+186
+00:11:44,793 --> 00:11:51,375
+And there's a max tokens argument that truncates, which, I'll tell you right now, is going
+
+187
+00:11:51,375 --> 00:11:52,619
+to bite us later.
+
+188
+00:11:52,619 --> 00:11:56,495
+And by the way, this exact format is a design choice.
+
+189
+00:11:56,495 --> 00:12:02,931
+OpenAI's ChatML uses tokens like im start and im end, Llama has its own, and they all do
+
+190
+00:12:02,931 --> 00:12:04,759
+basically the same thing.
+
+191
+00:12:04,759 --> 00:12:11,122
+What matters is that you render conversations the same way at training time and at test
+
+192
+00:12:11,122 --> 00:12:11,488
+time.
+
+193
+00:12:11,488 --> 00:12:15,729
+Even a single space different can quietly hurt your model.
+
+194
+00:12:15,729 --> 00:12:22,595
+Exercise: Add support for system messages to your render_conversation, the way the repo
+
+195
+00:12:22,595 --> 00:12:23,226
+does it.
+
+196
+00:12:23,226 --> 00:12:30,092
+Then write a conversation with two user turns and two assistant turns and visualize it.
+
+197
+00:12:30,092 --> 00:12:31,907
+Which tokens are green?
+
+198
+00:12:31,907 --> 00:12:34,590
+Pause the video and give it a try.
+
+199
+00:12:38,090 --> 00:12:44,643
+Okay so we have our token ids, but now we have a problem.
+
+200
+00:12:44,643 --> 00:12:54,876
+GPT-2's vocabulary has 50,257 tokens, so its embedding table has exactly 50,257 rows, and
+
+201
+00:12:54,876 --> 00:13:00,625
+our special tokens have ids 50,257 through 50,264.
+
+202
+00:13:00,625 --> 00:13:03,384
+There's no row for them.
+
+203
+00:13:03,384 --> 00:13:12,467
+If we feed id 50,257 into the original GPT-2, it's an index out of range error.
+
+204
+00:13:12,467 --> 00:13:19,490
+Now if you remember the GPT-2 reproduction video, we padded the vocab size from 50,257 up
+
+205
+00:13:19,490 --> 00:13:26,355
+to 50,304, because it's a nice number, divisible by 128, and the GPU kernels like that.
+
+206
+00:13:26,355 --> 00:13:30,064
+And we said those extra 47 rows are never used.
+
+207
+00:13:30,064 --> 00:13:32,116
+Well, today they get used.
+
+208
+00:13:32,116 --> 00:13:39,139
+So when we load the OpenAI weights, we copy their 50,257 rows, and we have to decide what
+
+209
+00:13:39,139 --> 00:13:40,953
+to put in the new rows.
+
+210
+00:13:40,953 --> 00:13:42,216
+Here's the code.
+
+211
+00:13:42,216 --> 00:13:49,239
+Copy GPT-2's rows, and then, for all the new rows, I'm using the average of all the token
+
+212
+00:13:49,239 --> 00:13:50,107
+embeddings.
+
+213
+00:13:50,107 --> 00:13:51,370
+Why the average?
+
+214
+00:13:51,370 --> 00:13:58,077
+Because random vectors could be anywhere, but the average sort of lives in the region
+
+215
+00:13:58,077 --> 00:14:02,575
+where real embeddings live, so it won't blow anything up.
+
+216
+00:14:02,575 --> 00:14:05,652
+Let's check that it did what we wanted.
+
+217
+00:14:06,652 --> 00:14:08,736
+So the table has 50,304 rows.
+
+218
+00:14:08,736 --> 00:14:14,987
+The language model head is literally the same tensor as the embedding table, that's the
+
+219
+00:14:14,987 --> 00:14:17,574
+weight sharing from the GPT-2 paper.
+
+220
+00:14:17,574 --> 00:14:23,394
+And that matters a lot here, because it means the new rows are not only the input
+
+221
+00:14:23,394 --> 00:14:29,430
+embeddings of our special tokens, they're also the output weights that produce their
+
+222
+00:14:29,430 --> 00:14:29,933
+logits.
+
+223
+00:14:29,933 --> 00:14:33,167
+And all the new rows are exactly the average.
+
+224
+00:14:33,167 --> 00:14:39,732
+Now, and this is something that Karpathy drills into you in the makemore videos, before we
+
+225
+00:14:39,732 --> 00:14:44,255
+train anything, let's sanity check the loss at initialization.
+
+226
+00:14:44,255 --> 00:14:45,568
+What do we expect?
+
+227
+00:14:45,568 --> 00:14:51,987
+If the model had no idea and spread its probability evenly over the vocabulary, the loss
+
+228
+00:14:51,987 --> 00:14:55,853
+would be minus log of one over 50,304, so about 10.8.
+
+229
+00:14:55,853 --> 00:15:00,595
+Let's look at the loss of every single token of our conversation.
+
+230
+00:15:01,595 --> 00:15:03,490
+So 10.8 is the uniform guess.
+
+231
+00:15:03,490 --> 00:15:09,371
+The normal English tokens look fine, the model is quite sure that "is" follows "What", and
+
+232
+00:15:09,371 --> 00:15:09,763
+so on.
+
+233
+00:15:09,763 --> 00:15:11,788
+But look at the special tokens.
+
+234
+00:15:11,788 --> 00:15:16,231
+All of them are around 15, which is much worse than a uniform guess.
+
+235
+00:15:16,231 --> 00:15:18,976
+The model is confidently wrong about them.
+
+236
+00:15:18,976 --> 00:15:21,524
+And it's because of the weight sharing.
+
+237
+00:15:21,524 --> 00:15:27,078
+The logit of a special token is the dot product of the hidden state with that average
+
+238
+00:15:27,078 --> 00:15:32,567
+embedding, and that just happens to be a small number compared to the logits of real
+
+239
+00:15:32,567 --> 00:15:33,024
+tokens.
+
+240
+00:15:33,024 --> 00:15:36,226
+So the probability is tiny, and the loss is huge.
+
+241
+00:15:36,226 --> 00:15:42,106
+And what this means is that at the start of finetuning, a lot of the loss is going to come
+
+242
+00:15:42,106 --> 00:15:47,464
+from these tokens, and the first thing the model will do is learn that they exist.
+
+243
+00:15:47,464 --> 00:15:50,862
+It's the hockey stick from makemore, all over again.
+
+244
+00:15:50,862 --> 00:15:57,695
+Exercise: Can you find a better initialization for the new rows, one that gives a loss of
+
+245
+00:15:57,695 --> 00:16:02,379
+about 10.8 or lower for the special tokens at initialization?
+
+246
+00:16:02,379 --> 00:16:08,828
+Try initializing assistant end to the embedding of a newline, or scaling the average
+
+247
+00:16:08,828 --> 00:16:09,365
+vector.
+
+248
+00:16:09,365 --> 00:16:12,206
+Measure the loss with the cell above.
+
+249
+00:16:12,206 --> 00:16:14,816
+Pause the video and give it a try.
+
+250
+00:16:18,316 --> 00:16:21,516
+Okay, now we need conversations to train on.
+
+251
+00:16:21,516 --> 00:16:22,533
+A lot of them.
+
+252
+00:16:22,533 --> 00:16:28,786
+And here's the key idea of the SFT stage in nanochat: the data is a mixture of several
+
+253
+00:16:28,786 --> 00:16:33,803
+datasets, and every one of them teaches the model one specific thing.
+
+254
+00:16:33,803 --> 00:16:36,275
+So let's build them one at a time.
+
+255
+00:16:36,275 --> 00:16:42,819
+And the one I find the most instructive is grade school math, GSM8K, so let's start there.
+
+256
+00:16:42,819 --> 00:16:48,739
+All of these datasets live on HuggingFace, and every dataset on HuggingFace has an
+
+257
+00:16:48,739 --> 00:16:51,194
+automatic export to parquet files.
+
+258
+00:16:51,194 --> 00:16:57,692
+So I wrote a tiny function that downloads those parquet files and reads them with pyarrow.
+
+259
+00:16:57,692 --> 00:17:00,940
+You don't need the datasets library for this.
+
+260
+00:17:00,940 --> 00:17:05,128
+Let's load the GSM8K training set and look at one problem.
+
+261
+00:17:06,128 --> 00:17:09,842
+7,473 problems, each with a question and an answer.
+
+262
+00:17:09,842 --> 00:17:11,517
+And look at the answer.
+
+263
+00:17:11,517 --> 00:17:14,940
+What are these things in double angle brackets?
+
+264
+00:17:14,940 --> 00:17:20,110
+These are calculator annotations, from the people who made the dataset.
+
+265
+00:17:20,110 --> 00:17:25,281
+"12 times 2 equals 24" is written out as the expression and its result.
+
+266
+00:17:25,281 --> 00:17:31,690
+And at the very end, after four hash signs, is the final answer, which is what we'll use
+
+267
+00:17:31,690 --> 00:17:32,564
+for grading.
+
+268
+00:17:32,564 --> 00:17:33,830
+So here's the plan.
+
+269
+00:17:33,830 --> 00:17:36,495
+These calculator annotations are a gift.
+
+270
+00:17:36,495 --> 00:17:40,693
+They're exactly the tool calls that we want our model to learn.
+
+271
+00:17:40,693 --> 00:17:46,557
+So we're going to turn every one of them into a python part, followed by a python output
+
+272
+00:17:46,557 --> 00:17:46,890
+part.
+
+273
+00:17:46,890 --> 00:17:51,355
+Step one, let's split the answer into the text and the annotations.
+
+274
+00:17:51,355 --> 00:17:56,152
+A regex split with a capture group keeps the separators, so we get both.
+
+275
+00:17:57,152 --> 00:18:02,174
+So we get the plain text, then the annotation, then text again, alternating.
+
+276
+00:18:02,174 --> 00:18:07,990
+Step two, for every annotation, we strip the angle brackets and split at the last equals
+
+277
+00:18:07,990 --> 00:18:08,320
+sign.
+
+278
+00:18:08,320 --> 00:18:14,201
+Left of it is the expression, which becomes a python part, and right of it is the result,
+
+279
+00:18:14,201 --> 00:18:16,514
+which becomes a python output part.
+
+280
+00:18:16,514 --> 00:18:18,563
+Everything else is a text part.
+
+281
+00:18:18,563 --> 00:18:23,849
+And then we can render it with our own render_conversation and look at the mask.
+
+282
+00:18:24,849 --> 00:18:30,345
+So the model is trained to write the expression, in green, the result is red, it will come
+
+283
+00:18:30,345 --> 00:18:34,497
+from python, and then the model copies the result into its sentence.
+
+284
+00:18:34,497 --> 00:18:37,550
+This is the simplest possible version of tool use.
+
+285
+00:18:37,550 --> 00:18:42,741
+The model learns to hand the arithmetic, which it's bad at, to a calculator, which is
+
+286
+00:18:42,741 --> 00:18:43,595
+perfect at it.
+
+287
+00:18:43,595 --> 00:18:46,710
+And at the end, the four hash signs and the answer.
+
+288
+00:18:46,710 --> 00:18:52,022
+Now to grade an answer, we just pull out the number after the hash signs, with a regex,
+
+289
+00:18:52,022 --> 00:18:53,976
+and compare it to the reference.
+
+290
+00:18:54,976 --> 00:19:01,980
+So 42 for our problem, commas get removed so 1,024 becomes 1024, and None when there's no
+
+291
+00:19:01,980 --> 00:19:03,082
+answer at all.
+
+292
+00:19:03,082 --> 00:19:05,364
+That's it, that's our grader.
+
+293
+00:19:05,364 --> 00:19:12,210
+And notice that this grader is going to be our reward in reinforcement learning, at the
+
+294
+00:19:12,210 --> 00:19:13,706
+end of the lecture.
+
+295
+00:19:13,706 --> 00:19:18,205
+The second dataset is MMLU, which is multiple choice questions.
+
+296
+00:19:18,205 --> 00:19:24,346
+And it teaches the model the format of multiple choice, which is how we'll evaluate it
+
+297
+00:19:24,346 --> 00:19:24,775
+later.
+
+298
+00:19:24,775 --> 00:19:30,988
+Let's write the function that renders a multiple choice question, and I'll show you two
+
+299
+00:19:30,988 --> 00:19:32,488
+little details in it.
+
+300
+00:19:33,488 --> 00:19:38,668
+The first detail is that the letter comes after the choice, not before it.
+
+301
+00:19:38,668 --> 00:19:44,899
+Big models don't care, but for small models it helps to have the letter right next to the
+
+302
+00:19:44,899 --> 00:19:46,019
+thing it labels.
+
+303
+00:19:46,019 --> 00:19:51,759
+The second detail is that there's no space between the equals sign and the letter.
+
+304
+00:19:51,759 --> 00:19:52,039
+Why?
+
+305
+00:19:52,039 --> 00:19:53,369
+Look at the tokens.
+
+306
+00:19:53,369 --> 00:19:57,570
+"Space A" is token 317, and "A" without a space is token 32.
+
+307
+00:19:57,570 --> 00:20:03,590
+These are completely different tokens as far as the model is concerned, just different
+
+308
+00:20:03,590 --> 00:20:04,220
+integers.
+
+309
+00:20:04,220 --> 00:20:07,440
+The assistant answers with just "A", token 32.
+
+310
+00:20:07,440 --> 00:20:13,601
+So in the prompt, we want the exact same token 32 to appear right next to the choice, so
+
+311
+00:20:13,601 --> 00:20:15,981
+the model can sort of point at it.
+
+312
+00:20:15,981 --> 00:20:21,581
+If you remember the tokenization video, so much weirdness in LLMs comes from the
+
+313
+00:20:21,581 --> 00:20:24,662
+tokenizer, and this is one of those details.
+
+314
+00:20:24,662 --> 00:20:28,539
+The third dataset is SmolTalk, from HuggingFace.
+
+315
+00:20:28,539 --> 00:20:35,243
+That's 460,000 general conversations, and it's where most of the personality of the
+
+316
+00:20:35,243 --> 00:20:36,939
+assistant comes from.
+
+317
+00:20:37,939 --> 00:20:42,610
+These were mostly generated by bigger language models, and then filtered.
+
+318
+00:20:42,610 --> 00:20:48,240
+And it's worth pausing on this, because Karpathy makes a really important point about it
+
+319
+00:20:48,240 --> 00:20:49,072
+in his talks.
+
+320
+00:20:49,072 --> 00:20:52,783
+When you talk to ChatGPT, who are you actually talking to?
+
+321
+00:20:52,783 --> 00:20:56,878
+You're talking to a statistical simulation of this kind of data.
+
+322
+00:20:56,878 --> 00:21:02,381
+Originally it was written by human labelers following long instructions from a company
+
+323
+00:21:02,381 --> 00:21:07,755
+about being helpful and harmless, and nowadays a lot of it is written by other LLMs.
+
+324
+00:21:07,755 --> 00:21:13,386
+But either way, the knowledge comes from pretraining, and the personality, the tone, the
+
+325
+00:21:13,386 --> 00:21:17,097
+length of the answers, all comes from imitating this data.
+
+326
+00:21:17,097 --> 00:21:20,002
+And the fourth dataset is my favorite.
+
+327
+00:21:20,002 --> 00:21:22,830
+How many r's are there in strawberry?
+
+328
+00:21:22,830 --> 00:21:27,493
+Famously, LLMs get this wrong, and now we can understand why.
+
+329
+00:21:27,493 --> 00:21:29,557
+Look at how it's tokenized.
+
+330
+00:21:30,557 --> 00:21:34,051
+With a space in front, strawberry is a single token.
+
+331
+00:21:34,051 --> 00:21:34,857
+One integer.
+
+332
+00:21:34,857 --> 00:21:37,074
+The model never sees the letters!
+
+333
+00:21:37,074 --> 00:21:42,986
+To count the r's, it would have to have memorized the spelling of every one of its fifty
+
+334
+00:21:42,986 --> 00:21:47,689
+thousand tokens, and then count in its head, in a single forward pass.
+
+335
+00:21:47,689 --> 00:21:53,534
+And without a space, it's three tokens, which is a completely different set of integers
+
+336
+00:21:53,534 --> 00:21:53,937
+again.
+
+337
+00:21:53,937 --> 00:21:57,787
+So nanochat has a synthetic task for this, called SpellingBee.
+
+338
+00:21:57,787 --> 00:22:01,947
+Synthetic means we generate the data ourselves, as much as we want.
+
+339
+00:22:01,947 --> 00:22:05,362
+And the interesting part is designing the ideal answer.
+
+340
+00:22:05,362 --> 00:22:10,826
+We know the model can't do this in one step, so we write out a procedure that it can do:
+
+341
+00:22:10,826 --> 00:22:16,228
+spell the word out, then go through the letters one at a time and keep a running count,
+
+342
+00:22:16,228 --> 00:22:20,016
+then double check with python, and only then give the answer.
+
+343
+00:22:20,016 --> 00:22:20,947
+Let's write it.
+
+344
+00:22:21,947 --> 00:22:23,288
+First, the spelling.
+
+345
+00:22:23,288 --> 00:22:29,323
+Then the counting, one letter per line, with a running count, so that no single token ever
+
+346
+00:22:29,323 --> 00:22:30,865
+needs much computation.
+
+347
+00:22:30,865 --> 00:22:36,631
+Then python checks it, and the answer goes after the hash signs, so the same grader as
+
+348
+00:22:36,631 --> 00:22:37,436
+GSM8K works.
+
+349
+00:22:37,436 --> 00:22:43,403
+And I think this is a really nice example of how you have to think about the cognition of
+
+350
+00:22:43,403 --> 00:22:44,074
+the model.
+
+351
+00:22:44,074 --> 00:22:49,974
+Every token only gets a fixed amount of compute, one forward pass through twelve layers.
+
+352
+00:22:49,974 --> 00:22:53,930
+So you want to spread the computation out over many tokens.
+
+353
+00:22:53,930 --> 00:22:59,763
+If you ask the model to blurt out the answer in the first token, you're asking it to do
+
+354
+00:22:59,763 --> 00:23:03,451
+all of the work in one forward pass, and it just can't.
+
+355
+00:23:03,451 --> 00:23:09,016
+In the repo, SpellingBee is this same function, plus a random word out of a list of
+
+356
+00:23:09,016 --> 00:23:14,581
+370,000 English words, a random letter, and a bunch of different ways of asking the
+
+357
+00:23:14,581 --> 00:23:15,185
+question.
+
+358
+00:23:15,185 --> 00:23:19,187
+Okay, and the last piece is to mix all of these together.
+
+359
+00:23:19,187 --> 00:23:25,366
+A mixture is just a big list of every example in every task, shuffled with a fixed seed.
+
+360
+00:23:25,366 --> 00:23:29,578
+And if you want more of something, you just put it in twice.
+
+361
+00:23:30,578 --> 00:23:35,714
+So about 75,000 conversations, and the tasks are nicely interleaved.
+
+362
+00:23:35,714 --> 00:23:42,058
+Now, I'm using small slices of SmolTalk and MMLU here, because we'll train on a CPU.
+
+363
+00:23:42,058 --> 00:23:48,779
+In nanochat, on a GPU, it's all 460,000 SmolTalk conversations, and here's the mixture in
+
+364
+00:23:48,779 --> 00:23:50,289
+our chat_sft script.
+
+365
+00:23:50,289 --> 00:23:56,180
+And remember what this mixture looks like, because it's going to matter later.
+
+366
+00:23:56,180 --> 00:24:01,769
+Twenty thousand SpellingBee examples is more than a quarter of everything.
+
+367
+00:24:01,769 --> 00:24:04,877
+Exercise: Write your own synthetic task.
+
+368
+00:24:04,877 --> 00:24:11,405
+For example, a task that teaches the model its own name and who made it, or one that
+
+369
+00:24:11,405 --> 00:24:13,970
+reverses a word letter by letter.
+
+370
+00:24:13,970 --> 00:24:20,965
+Generate the ideal answer with code, and think about how to spread the work across tokens.
+
+371
+00:24:20,965 --> 00:24:23,607
+Pause the video and give it a try.
+
+372
+00:24:27,107 --> 00:24:31,038
+Okay, so now we need to turn conversations into batches.
+
+373
+00:24:31,038 --> 00:24:34,337
+And in the pretraining videos this was trivial.
+
+374
+00:24:34,337 --> 00:24:40,162
+We had one endless stream of text, and we just chopped it into rows of 1024 tokens.
+
+375
+00:24:40,162 --> 00:24:42,549
+A document cut in half, who cares.
+
+376
+00:24:42,549 --> 00:24:44,795
+But a conversation is different.
+
+377
+00:24:44,795 --> 00:24:50,902
+If you cut it in half, you get a question without its answer, and an answer without its
+
+378
+00:24:50,902 --> 00:24:51,533
+question.
+
+379
+00:24:51,533 --> 00:24:57,500
+So we want every conversation in one piece, and we want every row to start with a BOS
+
+380
+00:24:57,500 --> 00:25:01,641
+token, because that's what the model will see at test time.
+
+381
+00:25:01,641 --> 00:25:05,546
+So the first question is, how long are conversations?
+
+382
+00:25:05,546 --> 00:25:06,578
+Let's measure.
+
+383
+00:25:07,578 --> 00:25:11,332
+Half of them are shorter than about 200 tokens.
+
+384
+00:25:11,332 --> 00:25:17,962
+But there's a long tail, ten percent are over a thousand tokens, and the longest is
+
+385
+00:25:17,962 --> 00:25:18,521
+20,000.
+
+386
+00:25:18,521 --> 00:25:25,550
+And with the rows of 512 tokens we're going to use on the CPU, one in five conversations
+
+387
+00:25:25,550 --> 00:25:26,348
+won't fit.
+
+388
+00:25:26,348 --> 00:25:28,345
+Keep that number in mind.
+
+389
+00:25:28,345 --> 00:25:34,265
+Okay so the simplest thing we could do is one conversation per row, and fill up the rest
+
+390
+00:25:34,265 --> 00:25:35,880
+of the row with padding.
+
+391
+00:25:35,880 --> 00:25:39,984
+And we don't train on the padding, so it gets a mask of zero.
+
+392
+00:25:39,984 --> 00:25:43,078
+Let's measure how much of the batch is wasted.
+
+393
+00:25:44,078 --> 00:25:46,780
+47 percent of every batch is padding.
+
+394
+00:25:46,780 --> 00:25:50,138
+Half of our compute would be spent on nothing.
+
+395
+00:25:50,138 --> 00:25:54,300
+And only a quarter of the tokens are actually trained on.
+
+396
+00:25:54,300 --> 00:25:55,468
+That's terrible.
+
+397
+00:25:55,468 --> 00:25:57,358
+So the better idea is packing.
+
+398
+00:25:57,358 --> 00:26:00,509
+We put several whole conversations into every row.
+
+399
+00:26:00,509 --> 00:26:03,723
+And the algorithm nanochat uses is called best fit.
+
+400
+00:26:03,723 --> 00:26:09,017
+We keep a buffer of a hundred conversations, and to fill a row, we keep grabbing the
+
+401
+00:26:09,017 --> 00:26:13,806
+longest conversation in the buffer that still fits in the space that's left.
+
+402
+00:26:13,806 --> 00:26:17,776
+And only when nothing fits anymore, we pad the rest of the row.
+
+403
+00:26:17,776 --> 00:26:21,872
+Long conversations go first, and the short ones fill in the gaps.
+
+404
+00:26:21,872 --> 00:26:23,889
+And we never cut a conversation.
+
+405
+00:26:23,889 --> 00:26:30,005
+But before I show you the code, I want to tell you about a bug I hit writing this, because
+
+406
+00:26:30,005 --> 00:26:31,635
+it's really instructive.
+
+407
+00:26:31,635 --> 00:26:37,683
+In my first version, I rendered every conversation with max tokens set to the row length,
+
+408
+00:26:37,683 --> 00:26:40,469
+so long conversations just got truncated.
+
+409
+00:26:40,469 --> 00:26:41,964
+Seems harmless, right?
+
+410
+00:26:41,964 --> 00:26:46,041
+Let's see what that does to a long multiple choice question.
+
+411
+00:26:47,041 --> 00:26:49,981
+513 tokens, and a mask that sums to zero.
+
+412
+00:26:49,981 --> 00:26:52,060
+Not a single trainable token!
+
+413
+00:26:52,060 --> 00:26:58,513
+These MMLU training questions include long reading passages, and the answer, the one green
+
+414
+00:26:58,513 --> 00:27:00,377
+token, is at the very end.
+
+415
+00:27:00,377 --> 00:27:05,755
+So truncation cut off the answer, and the whole conversation became prompt.
+
+416
+00:27:05,755 --> 00:27:07,547
+And here's the evil part.
+
+417
+00:27:07,547 --> 00:27:13,283
+The best fit algorithm loves these, because they're exactly the length of a row.
+
+418
+00:27:13,283 --> 00:27:19,593
+So it filled whole batches with them, and the loss on a batch with zero trainable tokens
+
+419
+00:27:19,593 --> 00:27:22,963
+is zero divided by zero, which is not a number.
+
+420
+00:27:22,963 --> 00:27:27,193
+My loss was NaN, and it took me a minute to figure out why.
+
+421
+00:27:27,193 --> 00:27:32,427
+So the fix is simple: if a conversation doesn't fit in a row, we skip it.
+
+422
+00:27:32,427 --> 00:27:35,080
+Okay, now let's write the real thing.
+
+423
+00:27:36,080 --> 00:27:37,177
+So let's read it.
+
+424
+00:27:37,177 --> 00:27:42,403
+The rows have one extra token, because the targets are the inputs shifted by one.
+
+425
+00:27:42,403 --> 00:27:46,726
+Here's the fix for my bug, we skip conversations that are too long.
+
+426
+00:27:46,726 --> 00:27:49,500
+Here's best fit, the longest one that fits.
+
+427
+00:27:49,500 --> 00:27:51,565
+The padding gets a mask of zero.
+
+428
+00:27:51,565 --> 00:27:54,985
+Then inputs and targets, exactly like in pretraining.
+
+429
+00:27:54,985 --> 00:27:58,985
+And wherever the mask is zero, we set the target to minus one.
+
+430
+00:27:58,985 --> 00:28:03,695
+And minus one is the ignore index of the cross entropy loss in our model.
+
+431
+00:28:03,695 --> 00:28:06,147
+So those positions simply don't count.
+
+432
+00:28:06,147 --> 00:28:12,268
+With packing, the padding goes down to about 8 percent, and that even includes the BOS
+
+433
+00:28:12,268 --> 00:28:15,258
+tokens at the start of every conversation.
+
+434
+00:28:15,258 --> 00:28:19,457
+And 42 percent of the tokens are trained on, instead of 25.
+
+435
+00:28:19,457 --> 00:28:23,514
+That's almost twice as much signal from the same compute.
+
+436
+00:28:23,514 --> 00:28:29,706
+Let's do one more sanity check, on our tiny France conversation, and look at the inputs
+
+437
+00:28:29,706 --> 00:28:31,486
+and targets side by side.
+
+438
+00:28:32,486 --> 00:28:36,609
+So the inputs are the conversation without its last token.
+
+439
+00:28:36,609 --> 00:28:41,940
+And the targets are minus one everywhere, except at the last two positions.
+
+440
+00:28:41,940 --> 00:28:48,267
+After assistant start, the target is Paris, and after Paris, the target is assistant end.
+
+441
+00:28:48,267 --> 00:28:52,887
+Those are the only two predictions that this conversation trains.
+
+442
+00:28:52,887 --> 00:28:59,619
+Exercise: Change the dataloader so that a conversation that's too long gets cropped in a
+
+443
+00:28:59,619 --> 00:29:05,203
+smarter way, keeping the last assistant answer, instead of being skipped.
+
+444
+00:29:05,203 --> 00:29:06,350
+Is it worth it?
+
+445
+00:29:06,350 --> 00:29:09,487
+Measure how many trained tokens you gain.
+
+446
+00:29:09,487 --> 00:29:12,087
+Pause the video and give it a try.
+
+447
+00:29:15,587 --> 00:29:18,758
+Okay, and now the punchline of this whole stage.
+
+448
+00:29:18,758 --> 00:29:22,853
+SFT is literally just pretraining with a different dataloader.
+
+449
+00:29:22,853 --> 00:29:28,006
+Same model, same cross entropy loss, same AdamW optimizer, same training loop.
+
+450
+00:29:28,006 --> 00:29:33,554
+The only differences are the minus ones in the targets, and a gentler learning rate.
+
+451
+00:29:33,554 --> 00:29:39,169
+The model already knows a lot, we're just nudging its statistics, so we use a smaller
+
+452
+00:29:39,169 --> 00:29:45,047
+learning rate than in pretraining, keep it constant for the first half, and then decay it
+
+453
+00:29:45,047 --> 00:29:45,576
+to zero.
+
+454
+00:29:46,576 --> 00:29:51,121
+Constant for the first half, then down to zero at the end.
+
+455
+00:29:51,121 --> 00:29:53,786
+That's the schedule nanochat uses.
+
+456
+00:29:53,786 --> 00:29:58,331
+And now, let's actually train, right here in the notebook.
+
+457
+00:29:58,331 --> 00:30:04,836
+A fresh copy of GPT-2, AdamW, our dataloader with small rows of 256 tokens, and the
+
+458
+00:30:04,836 --> 00:30:08,440
+training loop you've written ten times by now.
+
+459
+00:30:09,440 --> 00:30:11,488
+And the loss is going down.
+
+460
+00:30:11,488 --> 00:30:13,839
+From 3.4 to 1.6 in eight steps.
+
+461
+00:30:13,839 --> 00:30:20,209
+And notice how the number of trained tokens jumps around from batch to batch, that's
+
+462
+00:30:20,209 --> 00:30:26,958
+because every batch has a different mix of conversations, so the loss of a single step is
+
+463
+00:30:26,958 --> 00:30:27,413
+noisy.
+
+464
+00:30:27,413 --> 00:30:28,488
+So that's SFT.
+
+465
+00:30:28,488 --> 00:30:30,870
+Everything else is engineering.
+
+466
+00:30:30,870 --> 00:30:37,477
+I've put the dataloader, the schedule and the loop into chat_sft.py, plus command line
+
+467
+00:30:37,477 --> 00:30:44,007
+arguments, a validation loss every hundred steps, gradient accumulation, bfloat16 and
+
+468
+00:30:44,007 --> 00:30:48,694
+torch compile on a GPU, and saving the checkpoint at the end.
+
+469
+00:30:48,694 --> 00:30:55,148
+In nanochat, you do one full epoch over the whole mixture, which on a single A100 is
+
+470
+00:30:55,148 --> 00:30:57,299
+something like half an hour.
+
+471
+00:30:57,299 --> 00:31:03,983
+But to show you that you don't need a GPU, I ran a smaller version on a plain four core
+
+472
+00:31:03,983 --> 00:31:04,290
+CPU.
+
+473
+00:31:04,290 --> 00:31:09,130
+600 steps of four rows of 512 tokens, about an hour and a half.
+
+474
+00:31:11,630 --> 00:31:13,960
+Now look at the very first step.
+
+475
+00:31:13,960 --> 00:31:15,052
+A loss of 11.9.
+
+476
+00:31:15,052 --> 00:31:18,255
+Why so much higher than in our notebook run?
+
+477
+00:31:18,255 --> 00:31:20,948
+Look at the number of trained tokens.
+
+478
+00:31:20,948 --> 00:31:21,385
+Eight.
+
+479
+00:31:21,385 --> 00:31:23,205
+In the whole first batch!
+
+480
+00:31:23,205 --> 00:31:24,880
+Can you figure out why?
+
+481
+00:31:24,880 --> 00:31:25,899
+It's best fit.
+
+482
+00:31:25,899 --> 00:31:32,378
+At the start, the buffer is full, and the longest conversations in it are those long MMLU
+
+483
+00:31:32,378 --> 00:31:33,615
+reading passages.
+
+484
+00:31:33,615 --> 00:31:39,876
+So every row is one of them, and each one has exactly two green tokens, the letter and
+
+485
+00:31:39,876 --> 00:31:40,895
+assistant end.
+
+486
+00:31:40,895 --> 00:31:47,447
+And assistant end is one of our special tokens, the ones that start out with a loss of 15.
+
+487
+00:31:47,447 --> 00:31:52,980
+Then in step two there are 428 trained tokens, and the loss is a normal 2.6.
+
+488
+00:31:52,980 --> 00:31:59,095
+So the loss of a single step can be really misleading, and that's why we look at the
+
+489
+00:31:59,095 --> 00:32:03,536
+validation loss, which goes down smoothly, from 2.73 to 1.34.
+
+490
+00:32:03,536 --> 00:32:05,192
+Okay, now the fun part.
+
+491
+00:32:05,192 --> 00:32:06,417
+Let's talk to it.
+
+492
+00:32:06,417 --> 00:32:12,539
+Here's a little chat function: it puts the question in a conversation, renders it for
+
+493
+00:32:12,539 --> 00:32:15,709
+completion, and samples until assistant end.
+
+494
+00:32:16,709 --> 00:32:17,202
+"Hello!
+
+495
+00:32:17,202 --> 00:32:20,513
+How can I help you today?" And then it stopped.
+
+496
+00:32:20,513 --> 00:32:23,331
+All by itself, it emitted assistant end.
+
+497
+00:32:23,331 --> 00:32:27,346
+Compare that to the base model, which kept going forever.
+
+498
+00:32:27,346 --> 00:32:30,657
+So the format, the turn taking, that's learned.
+
+499
+00:32:30,657 --> 00:32:32,278
+Let's ask about France.
+
+500
+00:32:33,278 --> 00:32:36,068
+It answers directly now, as an assistant.
+
+501
+00:32:36,068 --> 00:32:38,315
+But then it gets stuck in a loop.
+
+502
+00:32:38,315 --> 00:32:44,100
+This is a classic failure of greedy decoding with small models: once it has said "the
+
+503
+00:32:44,100 --> 00:32:48,661
+capital of France" twice, the most likely thing is to say it again.
+
+504
+00:32:48,661 --> 00:32:52,269
+Sampling with a temperature helps, so let's try that.
+
+505
+00:32:53,269 --> 00:32:53,462
+Ha!
+
+506
+00:32:53,462 --> 00:32:54,299
+Look at this.
+
+507
+00:32:54,299 --> 00:32:57,134
+"We are asked to find the capital of France.
+
+508
+00:32:57,134 --> 00:33:02,804
+Let me try a manual approach first." And then it spells France, badly, counts the letter
+
+509
+00:33:02,804 --> 00:33:05,124
+f, and calls python to double check.
+
+510
+00:33:05,124 --> 00:33:09,183
+It's running the SpellingBee procedure on a geography question!
+
+511
+00:33:09,183 --> 00:33:09,441
+Why?
+
+512
+00:33:09,441 --> 00:33:10,794
+Remember the mixture.
+
+513
+00:33:10,794 --> 00:33:14,917
+SpellingBee is more than a quarter of everything this model saw.
+
+514
+00:33:14,917 --> 00:33:20,522
+And a lot of SpellingBee questions are short questions, like "what is the count of e in
+
+515
+00:33:20,522 --> 00:33:21,231
+some word".
+
+516
+00:33:21,231 --> 00:33:26,901
+So "what is the capital of France" looks like one of those on the surface, and the model
+
+517
+00:33:26,901 --> 00:33:28,898
+pattern matches on the surface.
+
+518
+00:33:28,898 --> 00:33:34,504
+If I sample answers to thirty real questions from the SmolTalk test set, only two start
+
+519
+00:33:34,504 --> 00:33:37,210
+like this, so it's mostly short questions.
+
+520
+00:33:37,210 --> 00:33:38,756
+But it's a great lesson.
+
+521
+00:33:38,756 --> 00:33:44,490
+Every dataset in the mixture shapes the model, in ways that leak out beyond that dataset.
+
+522
+00:33:44,490 --> 00:33:50,225
+When Karpathy added SpellingBee to nanochat, he noted in the commit that it probably uses
+
+523
+00:33:50,225 --> 00:33:51,964
+too many of these examples.
+
+524
+00:33:51,964 --> 00:33:56,668
+And on a GPU, with all of SmolTalk in the mixture, this mostly goes away.
+
+525
+00:33:57,668 --> 00:34:01,998
+And this one is kind of hilarious, meteoroids and molten metal.
+
+526
+00:34:01,998 --> 00:34:04,610
+So let's be honest about what we have.
+
+527
+00:34:04,610 --> 00:34:10,521
+This is a 124 million parameter model from 2019, finetuned for an hour and a half on a
+
+528
+00:34:10,521 --> 00:34:10,796
+CPU.
+
+529
+00:34:10,796 --> 00:34:16,295
+It doesn't know why the sky is blue, and it's happy to make things up with total
+
+530
+00:34:16,295 --> 00:34:17,051
+confidence.
+
+531
+00:34:17,051 --> 00:34:22,206
+The nanochat README says talking to its speedrun model is like talking to a
+
+532
+00:34:22,206 --> 00:34:25,093
+kindergartener, and we're well below that.
+
+533
+00:34:25,093 --> 00:34:31,142
+But the format is there, the turn taking is there, and as we'll see, on the narrow tasks
+
+534
+00:34:31,142 --> 00:34:34,579
+we specifically trained for, it can do quite well.
+
+535
+00:34:34,579 --> 00:34:41,641
+Exercise: Re-run SFT with five thousand SpellingBee examples instead of twenty thousand,
+
+536
+00:34:41,641 --> 00:34:48,543
+and measure how often the model starts an ordinary answer with "We are asked to find".
+
+537
+00:34:48,543 --> 00:34:51,834
+What happens to its SpellingBee accuracy?
+
+538
+00:34:51,834 --> 00:34:54,562
+Pause the video and give it a try.
+
+539
+00:34:58,062 --> 00:35:02,661
+Okay, so far we've been using the Engine to sample, as a black box.
+
+540
+00:35:02,661 --> 00:35:03,965
+Now let's write it.
+
+541
+00:35:03,965 --> 00:35:09,456
+Sampling has two problems that we need to solve: it needs to be fast, because in
+
+542
+00:35:09,456 --> 00:35:15,496
+reinforcement learning we're going to sample a lot, and it needs to run the python tool.
+
+543
+00:35:15,496 --> 00:35:17,074
+Let's start with speed.
+
+544
+00:35:17,074 --> 00:35:22,565
+Here's the simplest sampling loop you could write, the one from the GPT-2 video.
+
+545
+00:35:23,565 --> 00:35:25,672
+Several seconds for 100 tokens.
+
+546
+00:35:25,672 --> 00:35:26,692
+Why is it slow?
+
+547
+00:35:26,692 --> 00:35:28,867
+Think about what this loop does.
+
+548
+00:35:28,867 --> 00:35:33,489
+To get token number 7, it runs tokens 1 through 6 through the model.
+
+549
+00:35:33,489 --> 00:35:39,334
+Then to get token 8, it runs tokens 1 through 7 through the model, all of them, again.
+
+550
+00:35:39,334 --> 00:35:42,665
+But nothing about tokens 1 through 6 has changed!
+
+551
+00:35:42,665 --> 00:35:48,510
+Because of the causal mask, a token can only look at tokens before it, so its keys and
+
+552
+00:35:48,510 --> 00:35:52,316
+values in every layer are exactly the same as last time.
+
+553
+00:35:52,316 --> 00:35:58,094
+We're recomputing them over and over, and the total work grows like the square of the
+
+554
+00:35:58,094 --> 00:35:58,569
+length.
+
+555
+00:35:58,569 --> 00:36:00,649
+So the fix is to remember them.
+
+556
+00:36:00,649 --> 00:36:01,991
+That's the KV cache.
+
+557
+00:36:01,991 --> 00:36:07,693
+For every layer, we keep the keys and values of all the tokens so far, and when a new
+
+558
+00:36:07,693 --> 00:36:13,530
+token comes in, we only compute the query, key and value for that one token, append its
+
+559
+00:36:13,530 --> 00:36:18,897
+key and value to the cache, and let its query attend to everything in the cache.
+
+560
+00:36:18,897 --> 00:36:24,801
+Now, this needs three small changes inside our GPT, and you should make them in your own
+
+561
+00:36:24,801 --> 00:36:26,679
+gpt.py from the GPT-2 video.
+
+562
+00:36:26,679 --> 00:36:28,759
+Change one is the cache itself.
+
+563
+00:36:28,759 --> 00:36:34,462
+It's a tiny class that holds the keys and values, and update appends the new ones and
+
+564
+00:36:34,462 --> 00:36:35,736
+returns everything.
+
+565
+00:36:35,736 --> 00:36:37,816
+Change two is in the attention.
+
+566
+00:36:37,816 --> 00:36:42,311
+If there's a cache, we append and get back all the keys and values.
+
+567
+00:36:42,311 --> 00:36:43,921
+And here's a subtle one.
+
+568
+00:36:43,921 --> 00:36:49,691
+If we feed in a single new token, we don't want a causal mask at all, because that one
+
+569
+00:36:49,691 --> 00:36:53,179
+token is allowed to look at everything in the cache.
+
+570
+00:36:53,179 --> 00:36:55,326
+And change three, the positions.
+
+571
+00:36:55,326 --> 00:37:01,096
+The position embedding of the new token must start where the cache left off, otherwise
+
+572
+00:37:01,096 --> 00:37:04,450
+every new token would think it's at position zero.
+
+573
+00:37:04,450 --> 00:37:07,402
+And with that, here's sampling with a cache.
+
+574
+00:37:08,402 --> 00:37:12,695
+First we run the whole prompt through once, which fills the cache.
+
+575
+00:37:12,695 --> 00:37:14,386
+That's called the prefill.
+
+576
+00:37:14,386 --> 00:37:17,964
+And then every step, we only feed in the one new token.
+
+577
+00:37:17,964 --> 00:37:23,623
+Exactly the same tokens as the naive version, which is the first thing to always check,
+
+578
+00:37:23,623 --> 00:37:25,444
+and about four times faster.
+
+579
+00:37:25,444 --> 00:37:27,460
+And that gap grows with length.
+
+580
+00:37:27,460 --> 00:37:33,249
+And here's the cache of the first layer: batch of one, twelve heads, 106 positions, which
+
+581
+00:37:33,249 --> 00:37:37,738
+is our 6 prompt tokens plus 100 new ones, and 64 dimensions per head.
+
+582
+00:37:37,738 --> 00:37:41,796
+One more trick, which we'll need for reinforcement learning.
+
+583
+00:37:41,796 --> 00:37:44,974
+Often we want many samples for the same prompt.
+
+584
+00:37:44,974 --> 00:37:50,926
+So we do the prefill once, with a batch size of one, and then we just copy the cache for
+
+585
+00:37:50,926 --> 00:37:55,187
+every sample, and decode all of them in parallel, as one batch.
+
+586
+00:37:55,187 --> 00:37:57,411
+Okay, now the second job, tools.
+
+587
+00:37:57,411 --> 00:38:00,677
+Before I show you, think about it for a second.
+
+588
+00:38:00,677 --> 00:38:03,595
+The model is sampling one token at a time.
+
+589
+00:38:03,595 --> 00:38:08,528
+At some point it emits python start, then some tokens, then python end.
+
+590
+00:38:08,528 --> 00:38:12,350
+What should happen, and what should the model see next?
+
+591
+00:38:12,350 --> 00:38:13,423
+Here's the idea.
+
+592
+00:38:13,423 --> 00:38:17,381
+When we sample python start, we start recording the tokens.
+
+593
+00:38:17,381 --> 00:38:23,150
+When we sample python end, we decode the recorded tokens into a string, and we run it.
+
+594
+00:38:23,150 --> 00:38:24,894
+And then here's the trick.
+
+595
+00:38:24,894 --> 00:38:30,663
+We put output start, the tokens of the result, and output end into a queue, and on the
+
+596
+00:38:30,663 --> 00:38:36,231
+next steps, instead of using what the model sampled, we take tokens from the queue.
+
+597
+00:38:36,231 --> 00:38:37,372
+We force them in.
+
+598
+00:38:37,372 --> 00:38:43,141
+So the result appears in the model's own context, as if it had written it, and then it
+
+599
+00:38:43,141 --> 00:38:44,885
+just continues from there.
+
+600
+00:38:44,885 --> 00:38:45,891
+Let's write it.
+
+601
+00:38:46,891 --> 00:38:52,366
+So every step, if there are forced tokens waiting, we take one, otherwise we use the
+
+602
+00:38:52,366 --> 00:38:53,343
+model's choice.
+
+603
+00:38:53,343 --> 00:38:59,079
+On python start we start recording, on python end we run it, and we queue up the result.
+
+604
+00:38:59,079 --> 00:39:04,032
+And let's try it on our SFT model, on a spelling question it has never seen.
+
+605
+00:39:04,032 --> 00:39:05,596
+So look at what happens.
+
+606
+00:39:05,596 --> 00:39:08,920
+It spells the word, and it gets the spelling wrong!
+
+607
+00:39:08,920 --> 00:39:09,637
+e, y, u, r.
+
+608
+00:39:09,637 --> 00:39:15,437
+It roughly knows which letters are in there, but not in which order, because remember, it
+
+609
+00:39:15,437 --> 00:39:16,936
+never sees the letters.
+
+610
+00:39:16,936 --> 00:39:22,541
+Then it counts the u's in its own misspelled version and gets one, which happens to be
+
+611
+00:39:22,541 --> 00:39:22,933
+right.
+
+612
+00:39:22,933 --> 00:39:28,407
+Then it writes the python call, and in the python call it copies the word perfectly,
+
+613
+00:39:28,407 --> 00:39:30,428
+because copying tokens is easy.
+
+614
+00:39:30,428 --> 00:39:33,426
+And our code runs it and forces in the result.
+
+615
+00:39:33,426 --> 00:39:35,251
+And the final answer is one.
+
+616
+00:39:35,251 --> 00:39:38,640
+So the tool is robust to the model's own sloppiness.
+
+617
+00:39:38,640 --> 00:39:40,421
+Now, a word about safety.
+
+618
+00:39:40,421 --> 00:39:46,548
+We're running code that a neural network wrote, so the calculator is deliberately very
+
+619
+00:39:46,548 --> 00:39:47,331
+restricted.
+
+620
+00:39:47,331 --> 00:39:53,672
+It allows numbers and arithmetic, without powers, or the count method of a string, and it
+
+621
+00:39:53,672 --> 00:39:55,880
+evaluates without any builtins.
+
+622
+00:39:56,880 --> 00:40:03,467
+So arithmetic and counting work, and an attempt to run a shell command, or to compute a
+
+623
+00:40:03,467 --> 00:40:06,117
+gigantic number, just returns None.
+
+624
+00:40:06,117 --> 00:40:11,039
+Never give a language model an unrestricted eval on your machine.
+
+625
+00:40:11,039 --> 00:40:16,821
+And the Engine in the repo is exactly what we just wrote, but for a whole batch of samples
+
+626
+00:40:16,821 --> 00:40:22,602
+at once, with every row keeping its own little state, the prefill once and copy trick, and
+
+627
+00:40:22,602 --> 00:40:28,256
+one more thing: it returns a mask, one for tokens the model sampled, and zero for tokens
+
+628
+00:40:28,256 --> 00:40:29,540
+that were forced in.
+
+629
+00:40:29,540 --> 00:40:33,973
+Remember that mask, because we'll need it for reinforcement learning.
+
+630
+00:40:33,973 --> 00:40:37,057
+Let's sample eight answers to the same question.
+
+631
+00:40:38,057 --> 00:40:44,216
+Every sample has three forced tokens, output start, the result, and output end, and they
+
+632
+00:40:44,216 --> 00:40:49,185
+come out with different lengths, because we sampled with a temperature.
+
+633
+00:40:49,185 --> 00:40:56,088
+Exercise: Add the three KV cache changes to your own GPT from the GPT-2 video, and check
+
+634
+00:40:56,088 --> 00:41:01,894
+that your cached sampling gives exactly the same tokens as naive sampling.
+
+635
+00:41:01,894 --> 00:41:08,562
+Then make the cache faster: instead of concatenating tensors every step, allocate the
+
+636
+00:41:08,562 --> 00:41:11,621
+whole cache up front and write into it.
+
+637
+00:41:11,621 --> 00:41:14,289
+Pause the video and give it a try.
+
+638
+00:41:17,789 --> 00:41:20,946
+Okay, so we have a model that seems to work.
+
+639
+00:41:20,946 --> 00:41:24,964
+But "seems to work" is not good enough, we need numbers.
+
+640
+00:41:24,964 --> 00:41:28,551
+And there are two kinds of evaluation in nanochat.
+
+641
+00:41:28,551 --> 00:41:31,131
+The first is multiple choice, like MMLU.
+
+642
+00:41:31,131 --> 00:41:34,615
+And here's a neat thing: we don't even have to sample.
+
+643
+00:41:34,615 --> 00:41:39,130
+We render the question, prime the assistant, and run one forward pass.
+
+644
+00:41:39,130 --> 00:41:44,807
+Then we look at the logits at the last position, which is the model's prediction for the
+
+645
+00:41:44,807 --> 00:41:50,484
+first token of its answer, but only at the logits of the allowed letters, A, B, C and D.
+
+646
+00:41:50,484 --> 00:41:53,064
+Whichever is biggest, that's the answer.
+
+647
+00:41:53,064 --> 00:41:58,096
+Let's write it, and compare the base model and our SFT model on 100 questions.
+
+648
+00:41:59,096 --> 00:42:04,785
+One forward pass, the logits at the last position, restricted to the letters.
+
+649
+00:42:04,785 --> 00:42:10,770
+And both are about 25 percent, which is exactly random guessing for four choices.
+
+650
+00:42:10,770 --> 00:42:16,902
+And with only 100 questions, the noise on these numbers is about plus or minus five
+
+651
+00:42:16,902 --> 00:42:20,597
+percent, so 29 versus 26 is not a real difference.
+
+652
+00:42:20,597 --> 00:42:23,256
+Now this is important to understand.
+
+653
+00:42:23,256 --> 00:42:27,911
+GPT-2 small simply doesn't know the answers to these questions.
+
+654
+00:42:27,911 --> 00:42:33,083
+SFT can teach a format, but it can't teach knowledge that isn't there.
+
+655
+00:42:33,083 --> 00:42:39,512
+For MMLU to move, you need a much stronger pretrained model, which is a big part of why
+
+656
+00:42:39,512 --> 00:42:42,171
+nanochat trains its own base models.
+
+657
+00:42:42,171 --> 00:42:44,312
+The second kind is generative.
+
+658
+00:42:44,312 --> 00:42:49,664
+We sample an answer, pull out the number after the hash signs, and compare.
+
+659
+00:42:49,664 --> 00:42:53,874
+Let's do 20 SpellingBee questions the model has never seen.
+
+660
+00:42:54,874 --> 00:42:56,198
+Nine out of twenty.
+
+661
+00:42:56,198 --> 00:42:57,174
+So about half.
+
+662
+00:42:57,174 --> 00:43:02,888
+That's a narrow, procedural task, and SFT taught the model a procedure that it can
+
+663
+00:43:02,888 --> 00:43:05,327
+actually execute, most of the time.
+
+664
+00:43:05,327 --> 00:43:11,598
+In the repo, chat_eval.py has both of these, plus something nanochat calls ChatCORE: every
+
+665
+00:43:11,598 --> 00:43:17,660
+accuracy is rescaled so that zero means random guessing and one means perfect, and then
+
+666
+00:43:17,660 --> 00:43:19,402
+averaged into one number.
+
+667
+00:43:19,402 --> 00:43:22,747
+Here's what I got on 100 problems of every task.
+
+668
+00:43:25,247 --> 00:43:28,731
+Multiple choice is at chance for both, as we saw.
+
+669
+00:43:28,731 --> 00:43:34,987
+GSM8K is zero for both: the SFT model learned what a math solution looks like, with tool
+
+670
+00:43:34,987 --> 00:43:38,684
+calls and hash signs, but it can't do the reasoning.
+
+671
+00:43:38,684 --> 00:43:41,884
+And SpellingBee goes from zero to 53 percent.
+
+672
+00:43:41,884 --> 00:43:47,429
+So the ChatCORE goes from 0.02 to 0.11, and almost all of that is SpellingBee.
+
+673
+00:43:47,429 --> 00:43:53,828
+And 53 percent is not great, but it's not zero either, and that's exactly where we want to
+
+674
+00:43:53,828 --> 00:43:55,392
+be for the next stage.
+
+675
+00:43:55,392 --> 00:44:03,409
+Exercise: Evaluate the base model on MMLU with a few-shot prompt, using plain text instead
+
+676
+00:44:03,409 --> 00:44:05,102
+of our chat format.
+
+677
+00:44:05,102 --> 00:44:10,179
+How close can you get to the SFT model just by prompting?
+
+678
+00:44:10,179 --> 00:44:13,208
+Pause the video and give it a try.
+
+679
+00:44:16,708 --> 00:44:20,774
+Okay, and now the last stage, and I think the most exciting one.
+
+680
+00:44:20,774 --> 00:44:21,918
+Why do we need it?
+
+681
+00:44:21,918 --> 00:44:23,761
+Karpathy has a great analogy.
+
+682
+00:44:23,761 --> 00:44:25,031
+Think of a textbook.
+
+683
+00:44:25,031 --> 00:44:28,018
+Most of it is exposition, background knowledge.
+
+684
+00:44:28,018 --> 00:44:29,225
+That's pretraining.
+
+685
+00:44:29,225 --> 00:44:34,689
+Then there are worked examples, where an expert solves a problem step by step, and you
+
+686
+00:44:34,689 --> 00:44:35,515
+imitate them.
+
+687
+00:44:35,515 --> 00:44:36,214
+That's SFT.
+
+688
+00:44:36,214 --> 00:44:41,933
+And at the end of every chapter, there are practice problems, with the final answer in the
+
+689
+00:44:41,933 --> 00:44:44,029
+back of the book but no solution.
+
+690
+00:44:44,029 --> 00:44:48,604
+You try, you fail, you try again, and you figure out what works for you.
+
+691
+00:44:48,604 --> 00:44:50,510
+That's reinforcement learning.
+
+692
+00:44:50,510 --> 00:44:53,334
+And here's the deep reason why this matters.
+
+693
+00:44:53,334 --> 00:44:58,789
+With SFT, we make the model imitate a solution that some person, or some other model,
+
+694
+00:44:58,789 --> 00:44:59,174
+wrote.
+
+695
+00:44:59,174 --> 00:45:01,933
+But that author has a very different brain.
+
+696
+00:45:01,933 --> 00:45:07,452
+A step that's trivial for them might be a leap that our little model can't make in one
+
+697
+00:45:07,452 --> 00:45:07,837
+token.
+
+698
+00:45:07,837 --> 00:45:12,073
+And a step they wrote out carefully might be obvious to our model.
+
+699
+00:45:12,073 --> 00:45:17,014
+We don't actually know the best sequence of tokens for this particular model.
+
+700
+00:45:17,014 --> 00:45:19,325
+So the idea of RL is: don't tell it.
+
+701
+00:45:19,325 --> 00:45:23,111
+Let it try many times, and whatever works, do more of that.
+
+702
+00:45:23,111 --> 00:45:24,952
+So let's make that precise.
+
+703
+00:45:24,952 --> 00:45:31,091
+We have a question, the model samples an answer y, and we check it with our grader and get
+
+704
+00:45:31,091 --> 00:45:34,364
+a reward R, one if it's correct and zero if not.
+
+705
+00:45:34,364 --> 00:45:40,366
+And we want to maximize the expected reward, the average reward of the answers the model
+
+706
+00:45:40,366 --> 00:45:41,253
+would sample.
+
+707
+00:45:41,253 --> 00:45:45,072
+Now how do we get a gradient of an average over samples?
+
+708
+00:45:45,072 --> 00:45:48,278
+Here's the trick, and it's worth deriving once.
+
+709
+00:45:48,278 --> 00:45:54,211
+The expected reward is a sum over all possible answers of the probability of the answer
+
+710
+00:45:54,211 --> 00:45:59,941
+times its reward, so its gradient is the sum of the reward times the gradient of the
+
+711
+00:45:59,941 --> 00:46:00,759
+probability.
+
+712
+00:46:00,759 --> 00:46:06,829
+Now the gradient of p is the same thing as p times the gradient of log p, that's just the
+
+713
+00:46:06,829 --> 00:46:08,261
+chain rule backwards.
+
+714
+00:46:08,261 --> 00:46:11,671
+And plugging that in, we get an expectation again!
+
+715
+00:46:11,671 --> 00:46:16,991
+The average, over sampled answers, of the reward times the gradient of the log
+
+716
+00:46:16,991 --> 00:46:17,810
+probability.
+
+717
+00:46:17,810 --> 00:46:21,015
+And an expectation we can estimate by sampling.
+
+718
+00:46:21,015 --> 00:46:26,949
+And the log probability of an answer is the sum of the log probabilities of its tokens,
+
+719
+00:46:26,949 --> 00:46:30,768
+which is just minus the loss our model already computes.
+
+720
+00:46:30,768 --> 00:46:34,054
+So in code, it's almost embarrassingly simple.
+
+721
+00:46:34,054 --> 00:46:40,483
+Sample some answers, and for each one, take the log probability of its tokens, multiply by
+
+722
+00:46:40,483 --> 00:46:43,555
+its reward, and do gradient ascent on that.
+
+723
+00:46:43,555 --> 00:46:49,341
+If you squint, it's just SFT on your own samples, weighted by how good they were.
+
+724
+00:46:49,341 --> 00:46:52,842
+This is called the policy gradient, or REINFORCE.
+
+725
+00:46:52,842 --> 00:46:54,439
+But there's one problem.
+
+726
+00:46:54,439 --> 00:47:00,094
+If rewards are zero or one, the wrong answers get a weight of zero, so they're simply
+
+727
+00:47:00,094 --> 00:47:00,626
+ignored.
+
+728
+00:47:00,626 --> 00:47:06,615
+And on easy questions, where every answer is right, everything gets pushed up, even though
+
+729
+00:47:06,615 --> 00:47:08,278
+there's nothing to learn.
+
+730
+00:47:08,278 --> 00:47:10,740
+So what we do is subtract a baseline.
+
+731
+00:47:10,740 --> 00:47:16,662
+For every question, we sample a group of answers, say eight of them, and the advantage of
+
+732
+00:47:16,662 --> 00:47:20,720
+each answer is its reward minus the mean reward of the group.
+
+733
+00:47:20,720 --> 00:47:26,509
+So an answer that's better than average for this question has a positive advantage, and
+
+734
+00:47:26,509 --> 00:47:28,572
+its probability gets pushed up.
+
+735
+00:47:28,572 --> 00:47:32,098
+An answer that's worse than average gets pushed down.
+
+736
+00:47:32,098 --> 00:47:38,020
+And you can show that subtracting a baseline doesn't change the expected gradient at all,
+
+737
+00:47:38,020 --> 00:47:40,282
+it just makes it a lot less noisy.
+
+738
+00:47:40,282 --> 00:47:44,407
+This is the group in GRPO, group relative policy optimization.
+
+739
+00:47:44,407 --> 00:47:50,836
+Before we do this on a transformer, let's build intuition on the tiniest possible example.
+
+740
+00:47:50,836 --> 00:47:56,836
+Imagine a language model that produces a single token, out of four options, and only
+
+741
+00:47:56,836 --> 00:47:58,407
+option two is correct.
+
+742
+00:47:58,407 --> 00:48:00,621
+The whole model is four logits.
+
+743
+00:48:00,621 --> 00:48:06,836
+We sample a group of sixteen attempts, reward the correct ones, compute advantages, and
+
+744
+00:48:06,836 --> 00:48:08,336
+take a gradient step.
+
+745
+00:48:09,336 --> 00:48:15,250
+The probability of the correct answer starts at a quarter, because all logits are zero,
+
+746
+00:48:15,250 --> 00:48:20,009
+after ten steps it's at 85 percent, and it keeps climbing towards one.
+
+747
+00:48:20,009 --> 00:48:22,116
+Nobody ever told it the answer.
+
+748
+00:48:22,116 --> 00:48:25,448
+It just tried things and did more of what worked.
+
+749
+00:48:25,448 --> 00:48:31,226
+Now what if the model starts out really bad, and the correct answer is very unlikely?
+
+750
+00:48:32,226 --> 00:48:33,281
+Nothing happens.
+
+751
+00:48:33,281 --> 00:48:39,080
+The correct answer is never sampled, so the reward is always zero, so every advantage is
+
+752
+00:48:39,080 --> 00:48:41,057
+zero, and there's no gradient.
+
+753
+00:48:41,057 --> 00:48:46,592
+And this is the most important lesson about RL: it can only amplify things the model
+
+754
+00:48:46,592 --> 00:48:48,108
+already does sometimes.
+
+755
+00:48:48,108 --> 00:48:50,744
+It can't create a behavior from nothing.
+
+756
+00:48:50,744 --> 00:48:56,280
+That's why we do SFT first, to get into a regime where the model sometimes succeeds.
+
+757
+00:48:56,280 --> 00:49:02,145
+And the same is true at the other end: if all eight answers are right, every advantage is
+
+758
+00:49:02,145 --> 00:49:02,738
+zero too.
+
+759
+00:49:02,738 --> 00:49:07,021
+RL only learns from questions at the edge of the model's ability.
+
+760
+00:49:07,021 --> 00:49:10,121
+Okay, now the real thing, on our SFT model.
+
+761
+00:49:10,121 --> 00:49:11,490
+Step one, rollouts.
+
+762
+00:49:11,490 --> 00:49:17,833
+We take a SpellingBee question, render it for completion, and use our engine to sample a
+
+763
+00:49:17,833 --> 00:49:22,735
+group of eight answers, at temperature one, because we want variety.
+
+764
+00:49:22,735 --> 00:49:24,393
+Then we grade each one.
+
+765
+00:49:25,393 --> 00:49:26,831
+How many o's in spook.
+
+766
+00:49:26,831 --> 00:49:28,335
+Four right, four wrong.
+
+767
+00:49:28,335 --> 00:49:32,127
+That's a question right at the edge, perfect for learning.
+
+768
+00:49:32,127 --> 00:49:34,350
+Now step two, the policy gradient.
+
+769
+00:49:34,350 --> 00:49:40,104
+We pad the samples to the same length, and build inputs and targets exactly like in SFT.
+
+770
+00:49:40,104 --> 00:49:45,793
+And here's where the mask from the engine comes in: we set the targets to minus one for
+
+771
+00:49:45,793 --> 00:49:50,501
+the prompt, for the padding, and for the tokens that the tool forced in.
+
+772
+00:49:50,501 --> 00:49:54,293
+We only train on the tokens that the model actually chose.
+
+773
+00:49:54,293 --> 00:49:57,758
+Then advantages, the log probabilities, and the loss.
+
+774
+00:49:58,758 --> 00:49:59,949
+There's the mask.
+
+775
+00:49:59,949 --> 00:50:04,991
+The advantages are plus or minus a half, exactly like on the whiteboard.
+
+776
+00:50:04,991 --> 00:50:11,293
+The model gives us the loss of every token, the negative log probability, so we negate it,
+
+777
+00:50:11,293 --> 00:50:14,655
+and the ignored tokens come out as exactly zero.
+
+778
+00:50:14,655 --> 00:50:18,436
+And here's the average log probability of each answer.
+
+779
+00:50:18,436 --> 00:50:24,739
+The fifth answer, a wrong one, has a much lower log probability per token than the others,
+
+780
+00:50:24,739 --> 00:50:28,030
+it's a bit of an unusual sample for this model.
+
+781
+00:50:28,030 --> 00:50:34,122
+Then the loss: every token's log probability times the advantage of its answer, summed,
+
+782
+00:50:34,122 --> 00:50:40,355
+divided by the number of trained tokens, and with a minus sign, because PyTorch minimizes
+
+783
+00:50:40,355 --> 00:50:42,036
+and we want to maximize.
+
+784
+00:50:42,036 --> 00:50:44,907
+And then backward, and an optimizer step.
+
+785
+00:50:44,907 --> 00:50:46,798
+That's the whole algorithm.
+
+786
+00:50:46,798 --> 00:50:52,243
+Now if you've read about GRPO or PPO, you may wonder where everything else is.
+
+787
+00:50:52,243 --> 00:50:58,456
+And nanochat makes four deliberate simplifications, written right at the top of the file.
+
+788
+00:50:58,456 --> 00:51:02,017
+Number one, there's no KL penalty to the SFT model.
+
+789
+00:51:02,017 --> 00:51:08,230
+That's a regularizer that keeps the model from drifting too far, and for a short run like
+
+790
+00:51:08,230 --> 00:51:09,697
+ours it's not needed.
+
+791
+00:51:09,697 --> 00:51:12,349
+Number two, no PPO ratio and clipping.
+
+792
+00:51:12,349 --> 00:51:18,563
+Those exist because PPO takes several gradient steps on the same batch of samples, so the
+
+793
+00:51:18,563 --> 00:51:22,054
+samples go stale and you have to correct for that.
+
+794
+00:51:22,054 --> 00:51:28,267
+We take exactly one step per batch, so we're always on-policy, and the ratio would always
+
+795
+00:51:28,267 --> 00:51:29,314
+be exactly one.
+
+796
+00:51:29,314 --> 00:51:35,458
+Number three, we divide by the total number of tokens, not per answer, as the DAPO paper
+
+797
+00:51:35,458 --> 00:51:38,739
+suggests, so long answers aren't down-weighted.
+
+798
+00:51:38,739 --> 00:51:43,836
+And number four, we don't divide the advantage by the standard deviation.
+
+799
+00:51:43,836 --> 00:51:49,909
+Put it all together, and what's left is good old REINFORCE, with a group mean baseline.
+
+800
+00:51:49,909 --> 00:51:56,562
+And chat_rl.py is exactly the two cells we just wrote, the rollouts, and the loss, plus an
+
+801
+00:51:56,562 --> 00:52:00,184
+evaluation on held out questions every few steps.
+
+802
+00:52:00,184 --> 00:52:05,433
+On a GPU you'd use sixteen questions per step and sixteen samples each.
+
+803
+00:52:05,433 --> 00:52:11,790
+On my CPU, I did 40 steps of eight questions with eight samples each, which took about
+
+804
+00:52:11,790 --> 00:52:14,229
+three hours, most of it sampling.
+
+805
+00:52:16,729 --> 00:52:18,067
+So let's read this.
+
+806
+00:52:18,067 --> 00:52:24,121
+Pass at one is the fraction of single samples that are correct, and before RL, it's 44
+
+807
+00:52:24,121 --> 00:52:24,685
+percent.
+
+808
+00:52:24,685 --> 00:52:31,021
+Pass at eight is the fraction of questions where at least one of eight samples is correct,
+
+809
+00:52:31,021 --> 00:52:32,429
+and it's 92 percent.
+
+810
+00:52:32,429 --> 00:52:37,709
+So the model can already solve almost every question, it's just unreliable.
+
+811
+00:52:37,709 --> 00:52:43,693
+And after only ten steps of RL, pass at one jumps to 84 percent, and ends at 87 and a
+
+812
+00:52:43,693 --> 00:52:44,045
+half.
+
+813
+00:52:44,045 --> 00:52:46,297
+This is a really common pattern.
+
+814
+00:52:46,297 --> 00:52:52,282
+RL takes what the model can do some of the time, and makes it do it most of the time.
+
+815
+00:52:52,282 --> 00:52:54,816
+It turns pass at k into pass at one.
+
+816
+00:52:54,816 --> 00:52:59,220
+And the training reward is really noisy, look at step 26.
+
+817
+00:52:59,220 --> 00:53:06,096
+That's because every step only has eight questions, and some steps just get harder words.
+
+818
+00:53:06,096 --> 00:53:10,731
+Always trust a held out evaluation, not the training reward.
+
+819
+00:53:10,731 --> 00:53:12,508
+And one more fun thing.
+
+820
+00:53:12,508 --> 00:53:17,144
+The answers get shorter, from about 210 tokens to about 155.
+
+821
+00:53:17,144 --> 00:53:18,843
+Nobody asked for that.
+
+822
+00:53:18,843 --> 00:53:25,642
+But many long answers were ones where the model got lost, misspelling a word into a long
+
+823
+00:53:25,642 --> 00:53:31,591
+string of garbage letters, and those got zero reward, so RL pushed them down.
+
+824
+00:53:31,591 --> 00:53:38,544
+And with greedy decoding on 100 test questions, SpellingBee goes from 53 percent after SFT
+
+825
+00:53:38,544 --> 00:53:40,321
+to 86 percent after RL.
+
+826
+00:53:40,321 --> 00:53:43,221
+So now, finally, the famous question.
+
+827
+00:53:43,221 --> 00:53:49,490
+Eight samples from the SFT model and from the RL model, and their final answers.
+
+828
+00:53:50,490 --> 00:53:54,586
+Before RL, three r's in strawberry only once out of eight.
+
+829
+00:53:54,586 --> 00:53:56,634
+After RL, eight out of eight.
+
+830
+00:53:56,634 --> 00:53:57,764
+Same for cheese.
+
+831
+00:53:57,764 --> 00:53:58,470
+That's RL.
+
+832
+00:53:58,470 --> 00:54:03,625
+But look at the last question, without the quotes and without "the word".
+
+833
+00:54:03,625 --> 00:54:05,250
+Both models fall apart.
+
+834
+00:54:05,250 --> 00:54:06,380
+What's going on?
+
+835
+00:54:06,380 --> 00:54:07,156
+Let's look.
+
+836
+00:54:08,156 --> 00:54:12,447
+It says: we are asked to find the number of r's in the word "sweet".
+
+837
+00:54:12,447 --> 00:54:12,825
+Sweet!
+
+838
+00:54:12,825 --> 00:54:15,034
+It didn't even copy the right word.
+
+839
+00:54:15,034 --> 00:54:16,801
+And the tokens tell you why.
+
+840
+00:54:16,801 --> 00:54:20,902
+Without quotes, the word is "space strawberry", one single token.
+
+841
+00:54:20,902 --> 00:54:26,454
+With quotes, it's "st", "raw", "berry", exactly the tokens the model has to write in its
+
+842
+00:54:26,454 --> 00:54:28,473
+spelling and in the python call.
+
+843
+00:54:28,473 --> 00:54:31,565
+So with quotes, it just has to copy three tokens.
+
+844
+00:54:31,565 --> 00:54:36,676
+Without quotes, it has to know how one single token is spelled, and write it as a
+
+845
+00:54:36,676 --> 00:54:42,228
+different set of tokens, and it doesn't know that, so it reaches for something nearby in
+
+846
+00:54:42,228 --> 00:54:43,175
+meaning: sweet.
+
+847
+00:54:43,175 --> 00:54:48,664
+Our SpellingBee data mostly has rare words, which are several tokens either way, so the
+
+848
+00:54:48,664 --> 00:54:52,261
+model never learned to unpack a common single-token word.
+
+849
+00:54:52,261 --> 00:54:53,901
+The tokenizer, once again.
+
+850
+00:54:53,901 --> 00:54:59,580
+And the fix is what you'd do in practice: now that we understand the failure, add training
+
+851
+00:54:59,580 --> 00:55:01,283
+data for exactly this case.
+
+852
+00:55:01,283 --> 00:55:06,331
+You look at the failures, you understand them, and you go back and fix the data.
+
+853
+00:55:06,331 --> 00:55:12,837
+Exercise: Write the RL training loop yourself, using the two cells above: a loop over
+
+854
+00:55:12,837 --> 00:55:19,344
+questions, an AdamW optimizer with a small learning rate, and an evaluation of pass@1
+
+855
+00:55:19,344 --> 00:55:20,569
+every ten steps.
+
+856
+00:55:20,569 --> 00:55:27,305
+Then try changing the reward, for example a small penalty for long answers, and see what
+
+857
+00:55:27,305 --> 00:55:28,453
+the model does.
+
+858
+00:55:28,453 --> 00:55:32,280
+Careful: RL will find any loophole in your reward.
+
+859
+00:55:32,280 --> 00:55:34,883
+Pause the video and give it a try.
+
+860
+00:55:38,383 --> 00:55:39,912
+Okay, so let's zoom out.
+
+861
+00:55:39,912 --> 00:55:45,390
+We took a base model, a document simulator, and we gave it a format for conversations,
+
+862
+00:55:45,390 --> 00:55:47,683
+with special tokens and a loss mask.
+
+863
+00:55:47,683 --> 00:55:52,843
+We built a mixture of data where every part teaches something specific, a packing
+
+864
+00:55:52,843 --> 00:55:57,111
+dataloader, and we ran SFT, which is just pretraining on that data.
+
+865
+00:55:57,111 --> 00:56:02,780
+We wrote an inference engine with a KV cache and tool use, evaluations, and reinforcement
+
+866
+00:56:02,780 --> 00:56:04,755
+learning with a group baseline.
+
+867
+00:56:04,755 --> 00:56:08,450
+And you've now written every one of these pieces yourself.
+
+868
+00:56:08,450 --> 00:56:11,410
+And this maps one to one onto nanochat.
+
+869
+00:56:11,410 --> 00:56:18,012
+Our tokenizer, tasks, engine, and the chat_sft, chat_rl, chat_eval and chat_cli scripts
+
+870
+00:56:18,012 --> 00:56:20,289
+all have the same names there.
+
+871
+00:56:20,289 --> 00:56:27,120
+The real thing pretrains its own base model, whose size you pick with one depth parameter,
+
+872
+00:56:27,120 --> 00:56:33,798
+it uses the Muon optimizer, bfloat16, eight GPUs with data parallel, and in nanochat, RL
+
+873
+00:56:33,798 --> 00:56:35,089
+is done on GSM8K.
+
+874
+00:56:35,089 --> 00:56:38,276
+But the ideas are the ones you just built.
+
+875
+00:56:38,276 --> 00:56:41,312
+If you have a GPU node, it's one script.
+
+876
+00:56:42,312 --> 00:56:44,610
+And there's a lot we didn't cover.
+
+877
+00:56:44,610 --> 00:56:48,597
+We only did RL where we can check the answer automatically.
+
+878
+00:56:48,597 --> 00:56:50,828
+But what about a poem, or a joke?
+
+879
+00:56:50,828 --> 00:56:52,314
+There's no answer key.
+
+880
+00:56:52,314 --> 00:56:58,262
+That's where RLHF comes in, where you train a separate reward model on human preferences
+
+881
+00:56:58,262 --> 00:56:59,681
+and do RL against it.
+
+882
+00:56:59,681 --> 00:57:02,182
+Or DPO, which skips the reward model.
+
+883
+00:57:02,182 --> 00:57:07,927
+But a reward model is itself a neural net, and if you run RL against it for long, the
+
+884
+00:57:07,927 --> 00:57:11,103
+policy finds adversarial examples that fool it.
+
+885
+00:57:11,103 --> 00:57:17,118
+And there's the whole world of reasoning models, where you run RL for a long time on hard
+
+886
+00:57:17,118 --> 00:57:22,998
+math and code, and the model discovers on its own that it should think for a long time,
+
+887
+00:57:22,998 --> 00:57:25,972
+try different approaches and check its work.
+
+888
+00:57:25,972 --> 00:57:29,959
+Our little SpellingBee procedure is a tiny cartoon of that.
+
+889
+00:57:29,959 --> 00:57:32,024
+Okay, so that's it for today.
+
+890
+00:57:32,024 --> 00:57:38,003
+Take the code, run it, break it, add your own tasks, and see what your model learns.
+
+891
+00:57:38,003 --> 00:57:39,285
+See you next time.
