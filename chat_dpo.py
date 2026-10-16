@@ -42,6 +42,8 @@ parser.add_argument("--num-samples", type=int, default=8, help="answers per ques
 parser.add_argument("--max-new-tokens", type=int, default=256, help="max tokens per answer to a spelling question")
 parser.add_argument("--max-new-tokens-general", type=int, default=128, help="max tokens per answer to an ordinary question")
 parser.add_argument("--beta", type=float, default=0.1, help="how strongly to stay close to the reference model")
+parser.add_argument("--sft-weight", type=float, default=1.0, help="weight of an SFT loss on the chosen answers (0 = plain DPO)")
+parser.add_argument("--eval-before", type=int, default=1, help="evaluate the model before DPO too")
 parser.add_argument("--lr", type=float, default=5e-6)
 parser.add_argument("--batch-size", type=int, default=8, help="pairs per optimizer step")
 parser.add_argument("--epochs", type=int, default=2)
@@ -176,8 +178,9 @@ if __name__ == "__main__":
     num_val = max(1, len(pairs) // 10)
     val_pairs, train_pairs = pairs[:num_val], pairs[num_val:]
 
-    leak, spelling = evaluate(engine)
-    print(f"before DPO | leak {leak:.3f} | SpellingBee {spelling:.2f}")
+    if args.eval_before:
+        leak, spelling = evaluate(engine)
+        print(f"before DPO | leak {leak:.3f} | SpellingBee {spelling:.2f}")
 
     # the reference model never changes, so we compute its log probabilities once, up front
     with torch.no_grad():
@@ -214,7 +217,11 @@ if __name__ == "__main__":
             policy_chosen, policy_rejected = pair_logprobs(model, batch)
             ref = lambda key: torch.tensor([p[key] for p in batch], device=device)
             loss, chosen_reward, rejected_reward = dpo_loss(policy_chosen, policy_rejected, ref("ref_chosen"), ref("ref_rejected"), args.beta)
-            loss.backward()
+            # DPO only cares about the margin, so it can push the chosen answers down too, as long as the rejected ones go down
+            # faster, and the model drifts away from everything it knows. An SFT loss on the chosen answers (per token) anchors it
+            num_chosen_tokens = torch.tensor([sum(p["chosen"]["mask"][1:]) for p in batch], device=device)
+            sft_loss = -(policy_chosen / num_chosen_tokens).mean()
+            (loss + args.sft_weight * sft_loss).backward()
             lr = args.lr * (1 - step / num_steps) # linear decay to zero
             for group in optimizer.param_groups:
                 group["lr"] = lr
@@ -222,7 +229,7 @@ if __name__ == "__main__":
             optimizer.zero_grad(set_to_none=True)
             step += 1
             accuracy = (chosen_reward > rejected_reward).float().mean().item()
-            print(f"step {step:4d} | loss {loss.item():.4f} | accuracy {accuracy:.2f} | chosen {chosen_reward.mean().item():+.3f} | "
+            print(f"step {step:4d} | loss {loss.item():.4f} | sft {sft_loss.item():.3f} | accuracy {accuracy:.2f} | chosen {chosen_reward.mean().item():+.3f} | "
                   f"rejected {rejected_reward.mean().item():+.3f} | lr {lr:.2e} | dt {time.time() - t0:.1f}s", flush=True)
     val_loss, val_acc = val_metrics()
     print(f"step {step:4d} | val loss {val_loss:.4f} | val accuracy {val_acc:.3f}")
