@@ -29,7 +29,7 @@ This is an independent tutorial. It isn't made by or affiliated with Andrej Karp
 | [lecture/build.py](lecture/build.py) | lecture.md → notebook, narration (Kokoro, ElevenLabs or Fish Audio Drama 3), video + subtitles | |
 | [lecture/screencast.py](lecture/screencast.py) | Renders the lecture as a screencast: typing in a notebook, an editor with tabs, a terminal, a whiteboard, and a mouse that points and draws, driven by `[[cues]]` in lecture.md | |
 | [lecture/align.py](lecture/align.py), [lecture/avatar.py](lecture/avatar.py) | Word timings from Whisper (so actions land on the spoken word), and the animated narrator | |
-| [video/](video/) | The rendered lectures: `v3/` (the latest), `v2/` (the step-by-step screencast) and `v1/` (the first, slideshow version), each with subtitles | |
+| [video/](video/) | The rendered lectures, each with subtitles: `v3/` (the latest: 78 minutes, with the DPO chapter, pause-and-predict and the recipe), `v2/` (the first step-by-step screencast) and `v1/` (the first, slideshow version) | |
 
 The goal of the lecture: if you've finished Zero to Hero, you should be able to rebuild every piece of nanochat's post-training yourself. So nothing appears fully formed. Every component starts from a problem, tries the obvious thing, measures it failing, and then gets written in the notebook and tested before we look at the repo file:
 
