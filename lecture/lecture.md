@@ -1069,7 +1069,7 @@ def leak_rate(engine):
 print(f"sft: {leak_rate(sft_engine):.3f}, rl: {leak_rate(rl_engine):.3f}")
 ```
 
-LEAKNARRATION
+[[circle "sft: 0.125, rl: 0.125"]] One in eight answers, for both models. So this habit came from the SFT data mixture, and RL didn't fix it, of course: RL only ever practiced on spelling questions, so on ordinary questions, nobody ever told the model that this is wrong.
 
 So how do we fix it? Honestly, the best fix is in the data: use fewer SpellingBee examples in the SFT mixture, which is the exercise from the SFT chapter. But I want to use this as an example of a much bigger problem. Most of the things we want from an assistant, we can't write a grader for. Is this answer helpful? Is it too long? Is it rude? Is this joke funny? There's no answer key in the back of the book. But there's one thing people are really good at: looking at two answers, and saying which one is better. [[draw pipe]] And that's how ChatGPT was made. In the InstructGPT paper, people compared answers of the model, then OpenAI trained a reward model, a neural net that predicts which answer people will prefer, and then they ran RL against that reward model, with a leash that keeps the model close to where it started. [[draw dpo]] And in 2023, the DPO paper showed that you can skip the reward model, and the RL, and fit the model directly to the pairs, with the exact same objective. Let's see how that's possible. It's only a few lines of math, and it's really beautiful.
 
@@ -1096,13 +1096,13 @@ def dpo_toy(beta, steps=100):
 dpo_toy(beta=0.5)
 ```
 
-TOYNARRATION
+[[circle "step   0 | loss 0.6931"]] The loss starts at 0.693, which is log 2. The policy is the reference, so every margin is zero, and the sigmoid of zero is a half. [[circle "p(answer 2) 0.997"]] Then the probability of answer two goes up, to almost one. [[circle "weight 0.500"]] And look at this weight column. It's the sigmoid of minus the margin, and if you take the gradient of the DPO loss, this is exactly what multiplies everything: beta, times this weight, times push the chosen answer up and the rejected answer down. [[note "weight 0.031" "already right: stops pushing"]] So it's a lot like REINFORCE with a plus one and a minus one, except that the pairs the model already gets right stop counting. Now let's see what beta does.
 
 ```python
 dpo_toy(beta=2.0)
 ```
 
-TOY2NARRATION
+[[circle "p(answer 2) 0.886"]] With a beta of 2, the loss is already happy at 89 percent, [[circle "weight 0.002"]] and the weight is basically zero, so it stops pushing. With a big beta, a small move away from the reference already makes a big margin. So beta is the leash. A big beta keeps you close to where you started, and a small beta lets the model run far. Remember that, we're going to need it.
 
 Okay, now the real thing. First we need pairs. We sample eight answers from the RL model to an ordinary question, and then someone has to judge them. In real life, this is where a person, or a big LLM acting as a judge, looks at two answers and picks one. For us, the judge is that regular expression: does the answer start spelling things out when nobody asked? That's a stand-in, and to be honest, it's so simple that we could have used it as an RL reward. But it means that you can reproduce every number here, and the DPO code doesn't care at all where the preferences came from.
 
@@ -1115,7 +1115,7 @@ for seq in sequences:
     print("rejected" if LEAK.search(text) else "chosen  ", repr(text[:80]))
 ```
 
-PAIRNARRATION
+[[circle "find the number 'r' in the word 'loop quantum gravity transition"]] Ha, look at this one. We are asked to find the number of r's in the word "loop quantum gravity transitions". [[circle "chosen   'A typical loop quantum gravity transition"]] The chosen answers aren't exactly good physics, it's a tiny model, but they are the right kind of answer. So we take one chosen and one rejected answer, and that's a pair. Now the loss. We need the log probability of a whole answer, which is the sum of the log probabilities of its tokens, only over the answer, with our mask. And then the DPO loss is three lines.
 
 ```python
 import copy
@@ -1147,7 +1147,7 @@ print(f"log p(chosen) {ref_chosen.item():.2f}, log p(rejected) {ref_rejected.ite
 
 > **Predict:** Before any training, the policy and the reference are the same model. What will the DPO loss be?
 
-LOSSNARRATION
+[[circle "loss 0.6931"]] 0.693, log 2 again. At the start the policy is the reference, so both ratios are zero, the margin is zero, and minus log sigmoid of zero is log 2. That's our sanity check, just like the 10.8 at initialization in pretraining: if you don't get exactly 0.693 at step zero, something is wrong in your code. [[circle "log p(chosen) -78.79, log p(rejected) -18.49"]] And notice that the chosen answer is much less likely than the rejected one, minus 79 versus minus 18. It's partly that it's longer. But it doesn't matter, DPO doesn't look at the raw probabilities, only at how the ratios to the reference change. Now one step.
 
 ```python
 optimizer = torch.optim.AdamW(policy.parameters(), lr=1e-5)
@@ -1160,21 +1160,73 @@ print(f"loss {dpo_loss(policy_chosen, policy_rejected, ref_chosen, ref_rejected)
 del policy, optimizer
 ```
 
-STEPNARRATION
+[[circle "ratio(chosen) +7.960"]] After one step, the chosen answer is e to the 8 times more likely than under the reference, [[circle "ratio(rejected) -14.641"]] the rejected one e to the 15 times less likely, [[circle "loss 0.0993"]] and the loss went from 0.69 to 0.1. One step, on one pair! With a single pair, the model can overfit instantly. That's why the real run uses hundreds of pairs, a smaller learning rate, and only two passes over the data.
 
-And there's one more thing we must not forget. If we only show the model ordinary questions, nothing stops it from learning "never spell anything out", and then we'd lose everything RL just taught it. So the preference data also has spelling questions, where the chosen answer is a correct one, and the rejected answer is a wrong one. That's RL's checkable reward, turned into preferences. [[open chat_dpo.py "def collect_pairs(engine):"]] And that's chat_dpo.py. [[circle "good = [a for a in answers if not LEAK.search(a[\"text\"])]"]] The judge for ordinary questions, [[circle "good = [a for a in answers if bee.evaluate(conversation, a[\"text\"])]"]] the judge for spelling questions, [[circle "pairs.append({\"kind\": kind, \"chosen\": rng.choice(good), \"rejected\": rng.choice(bad)})"]] and a pair whenever there's at least one good and one bad answer among the eight. [[open chat_dpo.py "# the reference model never changes"]] Then, because the reference model never changes, we compute its log probabilities for all the pairs once, up front, [[open chat_dpo.py "loss.backward()"]] and the training loop is the same loop as always, with our loss. On my CPU, collecting the pairs took about RUNHOURS, and the training about RUNTRAIN.
+And there's one more thing we must not forget. If we only show the model ordinary questions, nothing stops it from learning "never spell anything out", and then we'd lose everything RL just taught it. So the preference data also has spelling questions, where the chosen answer is a correct one, and the rejected answer is a wrong one. That's RL's checkable reward, turned into preferences. [[open chat_dpo.py "def collect_pairs(engine, progress_path):"]] And that's chat_dpo.py. [[circle "good = [a for a in answers if not LEAK.search(a[\"text\"])]"]] The judge for ordinary questions, [[circle "good = [a for a in answers if bee.evaluate(conversation, a[\"text\"])]"]] the judge for spelling questions, [[circle "pair = {\"kind\": kind, \"chosen\": rng.choice(good), \"rejected\": rng.choice(bad)} if good and bad else None"]] and a pair whenever there's at least one good and one bad answer among the eight. [[open chat_dpo.py "# the reference model never changes"]] Then, because the reference model never changes, we compute its log probabilities for all the pairs once, up front, [[open chat_dpo.py "loss, chosen_reward, rejected_reward = dpo_loss("]] and the training loop is the same loop as always, with our loss. Collecting the pairs is the slow part: 850 questions, eight answers each, about an hour and a half on my CPU. The training itself is about fifteen minutes. Here's plain DPO, exactly the loss we just wrote, with a beta of 0.1.
+
+> **Predict:** On ordinary questions we push the spelling procedure down, and on spelling questions we push correct answers up. What will happen to the leak, and what will happen to SpellingBee?
 
 ```bash
-python chat_dpo.py --general-prompts=600 --spelling-prompts=250
+python chat_dpo.py --general-prompts=600 --spelling-prompts=250 --sft-weight=0 --beta=0.1
 ```
 
 ```output
-DPOOUTPUT
+Saved 285 pairs to /root/.cache/nanochat-posttrain/dpo_pairs_rl.jsonl
+196 ordinary pairs, 89 spelling pairs
+before DPO | leak 0.091 | SpellingBee 0.86
+step    0 | val loss 0.6931 | val accuracy 0.036
+step    1 | loss 0.6931 | accuracy 0.00 | chosen +0.000 | rejected +0.000 | lr 5.00e-06 | dt 18.3s
+step    2 | loss 0.6967 | accuracy 0.38 | chosen +0.006 | rejected +0.012 | lr 4.92e-06 | dt 13.5s
+...
+step   20 | loss 0.4514 | accuracy 0.88 | chosen +0.009 | rejected -0.812 | lr 3.52e-06 | dt 12.2s
+step   20 | val loss 0.4291 | val accuracy 0.929
+...
+step   40 | loss 0.2738 | accuracy 0.88 | chosen +0.009 | rejected -1.810 | lr 1.95e-06 | dt 10.8s
+step   40 | val loss 0.3638 | val accuracy 0.929
+...
+step   64 | loss 0.3336 | accuracy 1.00 | chosen -0.195 | rejected -1.555 | lr 7.81e-08 | dt 14.8s
+step   64 | val loss 0.3467 | val accuracy 0.929
+after DPO  | leak 0.000 | SpellingBee 0.47
 ```
 
-RUNNARRATION
+So, 285 pairs out of 850 questions. [[circle "before DPO | leak 0.091 | SpellingBee 0.86"]] Before DPO, nine percent of the answers to ordinary questions start the spelling procedure, and SpellingBee is at 86 percent. [[circle "step    0 | val loss 0.6931"]] The loss starts at exactly log 2, like we said. [[circle "val accuracy 0.929"]] The validation accuracy, which is how often the model ranks a held out pair the right way around, goes up to 93 percent. [[circle "after DPO  | leak 0.000"]] And the leak is gone. Zero. DPO did exactly what we asked. [[circle "SpellingBee 0.47"]] But SpellingBee crashed, from 86 percent to 47. We broke the thing that RL worked so hard for. So what happened? Look at the rewards. [[circle "chosen +0.009 | rejected -1.810"]] The chosen answers barely move, and the rejected ones go way down. Remember the implicit reward is beta times the log ratio, so a reward of minus 1.8 at a beta of 0.1 means the rejected answers became something like e to the 18 times less likely. DPO mostly works by pushing the rejected answers down. And what are the rejected answers? The spelling procedure, in the wrong place. The tokens of that procedure get pushed down everywhere, including where it belongs. And here's the subtle part: the spelling pairs can't protect it, because in a spelling pair, both answers use the procedure, and DPO only ever looks at the difference between the two. Let's see what it did to a spelling question.
 
-Let's see it for ourselves, on the same question as before, and on strawberry.
+```python
+broken_engine = Engine(load_model("dpo_nosft", device).eval(), tokenizer)
+spelling = {"messages": [{"role": "user", "content": "How many r are in collarbird?"}, {"role": "assistant", "content": ""}]}
+ids = tokenizer.render_for_completion(spelling)
+for name, engine_ in [("rl", rl_engine), ("plain dpo", broken_engine)]:
+    out, _ = engine_.generate_batch(ids, max_tokens=256, temperature=0.0)
+    print(f"--- {name}:\n{tokenizer.decode(out[0][len(ids):])[-330:]}")
+```
+
+[[circle "collarbird:c,r,t,t,c,t,o,r,o,d,o,d,o,d,o,d"]] The RL model spells collarbird badly, as always, and its manual count says one. [[circle "<|python_start|>'collarbird'.count('r')<|python_end|>"]] But then it calls python, which saves it, [[circle "#### 2"]] and the answer is two. [[circle "1 r = collarbird.count()"]] The plain DPO model has lost the procedure. It writes something that looks a bit like the python call, but as plain text, it never calls the tool, and it repeats itself until it runs out of tokens. It drifted away from what it knew.
+
+So we need two fixes, and both are about not drifting too far. [[open chat_dpo.py "sft_loss = -(policy_chosen / num_chosen_tokens).mean()"]] The first one is an SFT loss on the chosen answers, added to the DPO loss. It's literally the loss from the SFT chapter, the average log probability per token of the chosen answer, and it says: whatever you do to the margin, keep the good answers likely. And since the chosen spelling answers are correct procedures, that protects the procedure. This is what Meta did for Llama 3, for example. [[circle "parser.add_argument(\"--beta\", type=float, default=0.5,"]] And the second fix is the leash. Remember the toy: with a bigger beta, the loss is satisfied with a smaller move away from the reference. So we go from 0.1 to 0.5. Those are now the defaults of the script. The pairs are already saved, so this time it just loads them and trains.
+
+```bash
+python chat_dpo.py --general-prompts=600 --spelling-prompts=250 --eval-before=0
+```
+
+```output
+Loaded 285 pairs from /root/.cache/nanochat-posttrain/dpo_pairs_rl.jsonl
+196 ordinary pairs, 89 spelling pairs
+step    0 | val loss 0.6931 | val accuracy 0.036
+step    1 | loss 0.6931 | sft 1.203 | accuracy 0.00 | chosen +0.000 | rejected +0.000 | lr 5.00e-06 | dt 11.8s
+step    2 | loss 0.7132 | sft 1.575 | accuracy 0.38 | chosen +0.029 | rejected +0.062 | lr 4.92e-06 | dt 11.3s
+...
+step   20 | loss 0.3794 | sft 1.081 | accuracy 0.88 | chosen +0.256 | rejected -2.621 | lr 3.52e-06 | dt 9.6s
+step   20 | val loss 0.2551 | val accuracy 0.964
+...
+step   40 | loss 0.0972 | sft 1.129 | accuracy 1.00 | chosen +0.657 | rejected -6.189 | lr 1.95e-06 | dt 10.6s
+step   40 | val loss 0.2364 | val accuracy 0.893
+...
+step   64 | loss 0.1148 | sft 0.789 | accuracy 1.00 | chosen +0.497 | rejected -3.534 | lr 7.81e-08 | dt 13.4s
+step   64 | val loss 0.2414 | val accuracy 0.893
+after DPO  | leak 0.006 | SpellingBee 0.78
+```
+
+[[circle "chosen +0.657"]] This time the chosen answers actually go up, the SFT loss keeps them likely. [[circle "rejected -6.189"]] The rejected rewards look bigger, but remember, at a beta of 0.5 that's a log ratio of about minus 12, smaller than before. [[circle "after DPO  | leak 0.006 | SpellingBee 0.78"]] And the result: the leak is still basically gone, two answers out of 320, and SpellingBee is at 78 percent. Not quite the 86 we started with, and with a hundred test questions, the noise is about four percent, so we did lose a little. That's the honest story of preference tuning: it's a tradeoff, you have to measure what you might break, and you tune the leash. Okay, let's talk to it.
 
 ```python
 dpo_model = load_model("dpo", device).eval()
@@ -1186,9 +1238,9 @@ for seq in sequences:
 print(answers("How many r are in the word 'strawberry'?", dpo_engine))
 ```
 
-TALKNARRATION
+[[circle "leak | rl: 0.125, dpo: 0.000"]] On our twenty test questions, the leak goes from one in eight to zero. [[circle "'A typical loop quantum gravity transition is the introduction of a new element, '"]] On the loop quantum gravity question, with the same seed as before, all eight answers are ordinary answers now. [[circle "['3', '3', '3', '3', '3', '3', '3', '3']"]] And strawberry, with quotes, is still eight out of eight. So that's preference tuning. We never wrote down what a good answer is, we only said which of two answers was better, and the model picked it up, while keeping what it knew, as long as we kept it on a leash.
 
-> **Exercise:** Run chat_dpo.py with only the ordinary questions, no spelling pairs, and measure SpellingBee afterwards. Then try a beta of 0.5 and of 0.01, and see what happens to the leak and to the answers. And exercises fifteen and seventeen in the notebook are the two functions of this chapter: the log probability of an answer, and the DPO loss.
+> **Exercise:** We changed two things at once, the SFT loss and beta. Which one mattered? Run plain DPO with a beta of 0.5 and no SFT loss, and then the SFT loss with a beta of 0.1, and measure SpellingBee for both. Then do exercises fifteen and seventeen in the notebook: the log probability of an answer, and the DPO loss.
 
 ## Putting it all together
 

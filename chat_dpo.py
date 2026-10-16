@@ -15,7 +15,12 @@ questions that have nothing to do with spelling. We sample its own answers and p
 1) on ordinary questions: an answer that doesn't do that, over one that does
 2) on spelling questions: a correct answer over a wrong one (so we keep what RL taught it)
 
-CPU (a quick demo, about 3 hours on 4 cores, most of it collecting the pairs):
+Plain DPO (--sft-weight=0 --beta=0.1) gets rid of the habit, but SpellingBee drops from 86% to 47%: pushing
+the rejected answers down also pushes down the same procedure where it belongs, and DPO only looks at the
+difference between the two answers of a pair. So we add an SFT loss on the chosen answers (like Llama 3),
+and a bigger beta (a shorter leash): the defaults below. That keeps 78%.
+
+CPU (a quick demo, about 2 hours on 4 cores, most of it collecting the pairs):
 python chat_dpo.py --general-prompts=600 --spelling-prompts=250
 """
 
@@ -41,7 +46,7 @@ parser.add_argument("--spelling-prompts", type=int, default=800, help="spelling 
 parser.add_argument("--num-samples", type=int, default=8, help="answers per question, we pick one pair out of them")
 parser.add_argument("--max-new-tokens", type=int, default=256, help="max tokens per answer to a spelling question")
 parser.add_argument("--max-new-tokens-general", type=int, default=128, help="max tokens per answer to an ordinary question")
-parser.add_argument("--beta", type=float, default=0.1, help="how strongly to stay close to the reference model")
+parser.add_argument("--beta", type=float, default=0.5, help="how strongly to stay close to the reference model")
 parser.add_argument("--sft-weight", type=float, default=1.0, help="weight of an SFT loss on the chosen answers (0 = plain DPO)")
 parser.add_argument("--eval-before", type=int, default=1, help="evaluate the model before DPO too")
 parser.add_argument("--lr", type=float, default=5e-6)

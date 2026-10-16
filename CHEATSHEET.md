@@ -14,7 +14,7 @@ The whole lecture on one page: the recipe, the numbers to sanity check against, 
 | 6 | engine | KV cache: prefill once, decode one token at a time, copy the cache for many samples. Tools: on `<\|python_end\|>`, run a **restricted** calculator and force its output in. Return a mask of sampled (1) vs forced (0) tokens. | `engine.py` |
 | 7 | eval | Multiple choice from the logits of the allowed letters (no sampling). Generative: sample, grade `#### answer`. Before and after every stage, on held-out data. | `chat_eval.py` |
 | 8 | RL | Where you can check the answer. A group of samples per question, advantage = reward - group mean, loss = -(logp x advantage) summed over sampled tokens / number of tokens. Needs 0 < pass@k < 1. Turns pass@k into pass@1. | `chat_rl.py` |
-| 9 | preferences | Where you can only compare. Pairs of the model's own answers, chosen vs rejected. DPO loss = -log sigmoid(beta x ((log pi - log pi_ref)(chosen) - (log pi - log pi_ref)(rejected))). Cover the behavior you want to keep, too. | `chat_dpo.py` |
+| 9 | preferences | Where you can only compare. Pairs of the model's own answers, chosen vs rejected. DPO loss = -log sigmoid(beta x ((log pi - log pi_ref)(chosen) - (log pi - log pi_ref)(rejected))). Add an SFT loss on the chosen answers and keep beta big enough (we used 0.5), or the model drifts. Cover the behavior you want to keep, too, and measure it before and after. | `chat_dpo.py` |
 
 ## Numbers to sanity check against
 
@@ -22,7 +22,7 @@ The whole lecture on one page: the recipe, the numbers to sanity check against, 
 - First SFT batch with long MMLU passages: about 8 trained tokens and loss about 12. That's normal, the val loss is what counts.
 - Naive padding wastes about **47%** of a batch, best-fit packing about **8%**.
 - Multiple choice with 4 options: chance is **25%**, and with 100 questions the noise is about ±5%.
-- DPO at step 0 (policy = reference): loss is exactly **ln 2 = 0.693**, accuracy 0 (all margins are 0).
+- DPO at step 0 (policy = reference): loss is exactly **ln 2 = 0.693**, accuracy about 0 (all margins are 0, up to float noise).
 
 ## Debugging checklist
 
@@ -36,5 +36,5 @@ The whole lecture on one page: the recipe, the numbers to sanity check against, 
 | MMLU at chance after SFT | the base model doesn't know it. SFT teaches format, not knowledge |
 | RL reward doesn't move | every group is all right or all wrong: zero advantages. Pick questions at the edge of the model's ability |
 | RL reward up, held-out eval down | the model found a loophole in the reward, or you're overfitting a small question set |
-| DPO accuracy goes to 1 but the model gets weird | too many epochs on a small fixed set of pairs. Fewer steps, or a bigger beta |
+| DPO fixes the habit but breaks another skill | DPO pushes the rejected answers down everywhere, including where they belong (our SpellingBee went from 86% to 47%). Add an SFT loss on the chosen answers, use a bigger beta, fewer steps (we got back to 78%) |
 | works with quotes, fails without | tokenization: `" strawberry"` is one token, `"strawberry"` is three |
