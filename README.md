@@ -4,7 +4,7 @@ A from-scratch lecture on **all of LLM post-training**: chat formats and special
 
 We start where ["Let's reproduce GPT-2 (124M)"](https://www.youtube.com/watch?v=l8pRSuU81PU) ends: with a GPT-2 base model that can only babble. We end with an assistant that answers questions, uses a python tool for arithmetic, answers multiple choice, and counts the r's in strawberry. Then RL makes it better at that by practicing on its own, and DPO fixes a bad habit it picked up along the way, from nothing but pairs of its own answers.
 
-This is an independent tutorial. It isn't made by or affiliated with Andrej Karpathy, and the narration uses a stock synthetic voice (the stock ElevenLabs voice "Chris" in V3, Kokoro's `am_michael` in the local build), not a clone of his.
+This is an independent tutorial. It isn't made by or affiliated with Andrej Karpathy, and the narration uses a stock synthetic voice (Gemini 3.8 Flash TTS's prebuilt voice "Sadaltager" in V3, Kokoro's `am_michael` in V2 and in the default local build), not a clone of his.
 
 **How to use it:** watch a chapter, then close the video and do that chapter's exercises in [exercises.ipynb](exercises.ipynb). Every exercise is one function of the pipeline, with a check that runs it against the real thing and tells you exactly what's wrong. When all of them pass, you've rebuilt nanochat's post-training yourself. [CHEATSHEET.md](CHEATSHEET.md) has the whole recipe, the numbers to sanity check against, and a debugging checklist on one page.
 
@@ -29,7 +29,7 @@ This is an independent tutorial. It isn't made by or affiliated with Andrej Karp
 | [lecture/build.py](lecture/build.py) | lecture.md → notebook, narration (Kokoro, ElevenLabs or Fish Audio Drama 3), video + subtitles | |
 | [lecture/screencast.py](lecture/screencast.py) | Renders the lecture as a screencast: typing in a notebook, an editor with tabs, a terminal, a whiteboard, and a mouse that points and draws, driven by `[[cues]]` in lecture.md | |
 | [lecture/align.py](lecture/align.py), [lecture/avatar.py](lecture/avatar.py) | Word timings from Whisper (so actions land on the spoken word), and the animated narrator | |
-| [video/](video/) | The rendered lectures, each with subtitles: `v3/` (the latest: 78 minutes, with the DPO chapter, pause-and-predict and the recipe), `v2/` (the first step-by-step screencast) and `v1/` (the first, slideshow version) | |
+| [video/](video/) | The rendered lectures, each with subtitles: `v3/` (the latest: 79 minutes, narrated with Gemini TTS, with the DPO chapter, pause-and-predict and the recipe), `v2/` (the first step-by-step screencast) and `v1/` (the first, slideshow version) | |
 
 The goal of the lecture: if you've finished Zero to Hero, you should be able to rebuild every piece of nanochat's post-training yourself. So nothing appears fully formed. Every component starts from a problem, tries the obvious thing, measures it failing, and then gets written in the notebook and tested before we look at the repo file:
 
