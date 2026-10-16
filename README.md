@@ -50,15 +50,16 @@ Every chapter has a "pause the video and try it yourself" exercise, linked to th
 
 ## Results from the lecture's run
 
-Everything shown in the lecture comes from a real run on a 4-core CPU. That was 600 SFT steps (about 1.5 hours) and 40 RL steps on SpellingBee (about 3 hours). Evals use 100 problems per task, so expect about ±5% noise.
+Everything shown in the lecture comes from a real run on a 4-core CPU. That was 600 SFT steps (about 1.5 hours), 40 RL steps on SpellingBee (about 3 hours), and DPO (about 2 hours). Evals use 100 problems per task, so expect about ±5% noise.
 
 | | ARC-Easy | ARC-Challenge | MMLU | GSM8K | SpellingBee (greedy) |
 |---|---|---|---|---|---|
 | GPT-2 base (chat format) | 29% | 26% | 29% | 0% | 0% |
 | after SFT | 24% | 26% | 26% | 0% | 53% |
 | after RL | | | | | 86% |
+| after DPO (+ SFT loss, beta 0.5) | | | | | 78% |
 
-During RL, held-out SpellingBee pass@1 at temperature 1 went from 44% to 87.5%, and pass@8 from 92% to 100%. Multiple choice and GSM8K stay at chance: GPT-2 small doesn't have the knowledge, and SFT can't add it. The lecture discusses this honestly, along with the two failures worth learning from: SpellingBee "leaking" into unrelated answers, and the single-token " strawberry" that the model can't spell.
+During RL, held-out SpellingBee pass@1 at temperature 1 went from 44% to 87.5%, and pass@8 from 92% to 100%. DPO, on 285 preference pairs collected from the RL model's own answers (about 2 hours on the CPU), took the SpellingBee habit leaking into ordinary answers from 9.1% to 0.6%. Plain DPO did it too, but dropped SpellingBee to 47%; an SFT loss on the chosen answers and a bigger beta brought it back to 78%. The lecture shows all three runs. Multiple choice and GSM8K stay at chance: GPT-2 small doesn't have the knowledge, and SFT can't add it. The lecture discusses this honestly, along with the two failures worth learning from: SpellingBee "leaking" into unrelated answers, and the single-token " strawberry" that the model can't spell.
 
 ## Follow along
 

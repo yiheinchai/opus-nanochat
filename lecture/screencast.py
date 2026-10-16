@@ -1189,7 +1189,7 @@ def render(blocks, tts, voice, teacher=True, workers=3):
         for out in pool.imap(render_chunk, jobs):
             print(f"rendered {os.path.basename(out)}", flush=True)
     with open(os.path.join(chunks_dir, "chunks.txt"), "w") as f:
-        f.writelines(f"file '{j[-1]}'\n" for j in jobs)
+        f.writelines(f"file '{j[5]}'\n" for j in jobs) # j[5] is the chunk's path
     out = os.path.join(B.BUILD, "lecture.mp4")
     subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-f", "concat", "-safe", "0", "-i", os.path.join(chunks_dir, "chunks.txt"),
                     "-f", "concat", "-safe", "0", "-i", os.path.join(B.BUILD, "audio.txt"), "-map", "0:v", "-map", "1:a",
