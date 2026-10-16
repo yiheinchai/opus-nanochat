@@ -1092,7 +1092,9 @@ def chrome_for(chapter):
     return _chrome[chapter]
 
 def render_chunk(job):
-    c, name, f0, f1, teacher_txt, out = job
+    c, name, f0, f1, teacher_txt, out, sig = job
+    if os.path.exists(out) and os.path.exists(out + ".sig") and open(out + ".sig").read() == sig:
+        return out # rendered by an earlier (maybe interrupted) run, and nothing in it changed since
     lec, frames = _lec, _frames
     chrome = chrome_for(name)
     cmd = ["ffmpeg", "-y", "-loglevel", "error", "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", f"{W}x{H}", "-r", str(FPS), "-i", "-"]
@@ -1112,7 +1114,9 @@ def render_chunk(job):
             last_key = key
         proc.stdin.write(last_bytes)
     proc.stdin.close()
-    proc.wait()
+    if proc.wait() == 0:
+        with open(out + ".sig", "w") as f:
+            f.write(sig)
     return out
 
 def render(blocks, tts, voice, teacher=True, workers=3):
@@ -1149,6 +1153,12 @@ def render(blocks, tts, voice, teacher=True, workers=3):
     # one chunk per chapter, rendered in parallel
     chunks_dir = os.path.join(B.BUILD, "chunks")
     os.makedirs(chunks_dir, exist_ok=True)
+    # a signature per chapter: its blocks, its audio, and the renderer's own code. Same signature = same video
+    groups, code = [[]], open(__file__).read() + open(B.__file__).read() + open(avatar.__file__).read()
+    for b in blocks:
+        if b["type"] == "chapter" and groups[-1] and any(x["type"] == "chapter" for x in groups[-1]):
+            groups.append([])
+        groups[-1].append(b)
     jobs = []
     for c, (name, t0, t1) in enumerate(lec.chapter_spans):
         f0, f1 = round(t0 * FPS), round(t1 * FPS)
@@ -1168,7 +1178,13 @@ def render(blocks, tts, voice, teacher=True, workers=3):
                         f.write(f"file '{sprite}'\nduration {piece:.4f}\n")
                         seconds -= piece
                 f.write(f"file '{track[-1][0]}'\n")
-        jobs.append((c, name, f0, f1, teacher_txt, os.path.join(chunks_dir, f"chunk_{c:02d}.mp4")))
+        audio, tt = [], 0.0 # just this chapter's audio
+        for path, seconds, _ in lec.audio:
+            if tt + 1e-6 >= t0 and tt < t1 - 1e-6:
+                audio.append((path, round(seconds, 3)))
+            tt += seconds
+        sig = hashlib.sha1(json.dumps([name, f0, f1, teacher, groups[c] if c < len(groups) else None, audio, code], default=str).encode()).hexdigest()
+        jobs.append((c, name, f0, f1, teacher_txt, os.path.join(chunks_dir, f"chunk_{c:02d}.mp4"), sig))
     with Pool(workers) as pool:
         for out in pool.imap(render_chunk, jobs):
             print(f"rendered {os.path.basename(out)}", flush=True)
